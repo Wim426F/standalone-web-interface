@@ -230,6 +230,7 @@ const initialState = {
   presets: [], // named parameter sets ({id, name, params: {name: value}})
   deviceName: '', // friendly nickname for this module (Settings → Device)
   ssePort: 0, // port of the firmware's SSE value stream (0 = not offered)
+  backendPc: false, // served by the PC backend (python-can) instead of an ESP32
   history: {}, // recent numeric samples for dashboard sparklines
 };
 
@@ -448,7 +449,8 @@ function reducer(state, action) {
     case 'TOGGLE_NAVBAR':
       return { ...state, navbarBig: !state.navbarBig };
     case 'SET_CAN_CONFIG':
-      return { ...state, canMode: action.payload.canMode, canNodeId: action.payload.canNodeId };
+      return { ...state, canMode: action.payload.canMode, canNodeId: action.payload.canNodeId,
+        backendPc: 'backendPc' in action.payload ? action.payload.backendPc : state.backendPc };
     case 'SET_CAN_NODE':
       return { ...state, canActiveNodeId: action.payload };
     case 'SET_CAN_NODES':
@@ -754,7 +756,7 @@ const Dashboard = () => {
         <button onclick=${() => api.getText('stop').then(r => dispatch({ type: 'SET_MESSAGES', payload: r }))}><${Icon} n="stop" />Stop inverter</button>
         <h3 class="underline">Reset</h3>
         <button onclick=${() => setConfirmAction('inverter')}><${Icon} n="rotate" />Reboot Inverter</button>
-        <button onclick=${() => setConfirmAction('esp32')}><${Icon} n="power" />Reboot ESP32</button>
+        ${!state.backendPc && html`<button onclick=${() => setConfirmAction('esp32')}><${Icon} n="power" />Reboot ESP32</button>`}
       </div>
       <div class="main-left">
         <h2>Dashboard</h2>
@@ -1632,6 +1634,7 @@ const Update = () => {
   // newer release is known (the navbar badge brought the user here), load
   // its release list straight away — once per page load, not per tab visit.
   useEffect(() => {
+    if (state.backendPc) return; // ESP OTA does not exist on the PC backend
     api.getOtaInfo().then(info => {
       setOtaTarget(info.target || 'esp32');
       const repo = info.repo || 'https://github.com/wjcloudy/esp32-web-interface';
@@ -1938,6 +1941,7 @@ const Update = () => {
           `}
           <p>${otaMsg}</p>
         </div>
+        ${!state.backendPc && html`
         <h3 class="underline">Web Interface</h3>
         ${updateNewer && html`
           <p id="update-newer-note" style="color:var(--accent);font-size:.78rem;font-weight:600;margin:0 0 .25rem">▲ Newer release available: ${state.updateTag}</p>
@@ -1971,6 +1975,7 @@ const Update = () => {
         <div class="flex-break"></div>
         <${ToggleRow} label="Daily update check" checked=${autoChk}
           onChange=${v => { setAutoChk(v); setUpdateCheckAuto(v); }} />
+        `}
         ${updating && html`
           <div id="progress" class="graph">
             <div id="upload-firmware-bar" style=${{ width: progress + '%' }}></div>
@@ -1988,6 +1993,13 @@ const Update = () => {
           <p>Use <b>Install firmware from file</b> to flash a .bin from your computer, or <b>Load OTA releases</b> to fetch official stm32-sine releases from GitHub.</p>
           <p style="font-size:.8rem;color:var(--text3);margin:0">${state.canMode ? 'Updates are sent over the CAN bus — the device needs the CAN-capable bootloader.' : 'Updates are sent over the serial connection to the inverter.'}</p>
         </div>
+        ${state.backendPc && html`
+        <div class="dash-box compact">
+          <h3>Web Interface</h3>
+          <p>This web interface runs directly on your computer — update it with <code>pip install --upgrade openinverter-web</code> (or <code>git pull</code> in a checkout) and restart the app.</p>
+        </div>
+        `}
+        ${!state.backendPc && html`
         <div class="dash-box compact">
           <h3>Web Interface</h3>
           <p>Updates <b>this ESP32 module</b> — the combined <code>*-ota.bin</code> image carries the ESP32 firmware and the web pages together so they can't drift out of sync.</p>
@@ -1996,6 +2008,7 @@ const Update = () => {
           <p><b>Updating erases your saved settings and favourites</b> — the whole filesystem is replaced. Use <b>Export settings (backup)</b> first, then restore them from Settings afterwards.</p>
           <p style="font-size:.8rem;color:var(--text3);margin:0">The bootloader and partition table aren't touched, so a bad image stays recoverable over USB. The web interface reboots and the page reloads when done.</p>
         </div>
+        `}
       </div>
     </div>
   `;
@@ -2963,13 +2976,14 @@ const Settings = () => {
   // Live link state for the WiFi card — refreshed while Settings is open so
   // the signal reading tracks antenna position/moving the device around
   useEffect(() => {
+    if (state.backendPc) return; // no WiFi hardware on the PC backend
     let alive = true;
     const load = () => fetch('/wifi-status').then(r => r.ok ? r.json() : null)
       .then(s => { if (alive && s) setWifiStatus(s); }).catch(() => {});
     load();
     const t = setInterval(load, 5000);
     return () => { alive = false; clearInterval(t); };
-  }, []);
+  }, [state.backendPc]);
   // Sub-tab (Device & Connection / Web Interface / Configuration) —
   // deep-linkable as #settings/device|web|config
   const [subTab, setSubTab] = useState(() => {
@@ -2992,6 +3006,57 @@ const Settings = () => {
   const [canEnPin, setCanEnPin] = useState('');
   const [canEnInv, setCanEnInv] = useState(false);
   const [boardArch, setBoardArch] = useState(''); // '' = unknown → offer no presets (don't guess the wrong chip's pins)
+  // PC backend (python-can): an adapter picker replaces the GPIO pin config
+  const [backendPc, setBackendPc] = useState(false);
+  const [pcIface, setPcIface] = useState('');
+  const [pcChannel, setPcChannel] = useState('');
+  const [pcBitrate, setPcBitrate] = useState(500000);
+  const [pcDataDir, setPcDataDir] = useState('');
+  const [savedPc, setSavedPc] = useState({ iface: '', channel: '', bitrate: 500000 });
+  const [pcConn, setPcConn] = useState(null); // live adapter link state {ok, msg}
+  // Channel is never free-typed: picking an adapter auto-scans for its
+  // channels and the user selects from what was actually found
+  const [pcChannels, setPcChannels] = useState([]); // [{channel, description}]
+  const [pcChanScanning, setPcChanScanning] = useState(false);
+  const [pcChanMsg, setPcChanMsg] = useState('');
+  const [pcManualChannel, setPcManualChannel] = useState(false); // escape hatch for undetectable adapters (Kvaser/Vector channel index, etc.)
+
+  const scanChannels = async (iface, opts) => {
+    const keep = opts && opts.keep; // preserve the current selection if still valid
+    if (!iface || iface === 'virtual') { setPcChannels([]); setPcChanMsg(''); return; }
+    setPcChanScanning(true); setPcChanMsg('');
+    try {
+      const r = await fetch('/can-detect?interface=' + encodeURIComponent(iface));
+      const d = await r.json();
+      const found = d.channels || [];
+      setPcChannels(found);
+      if (found.length === 0) {
+        setPcChanMsg('No channels found for ' + iface + ' — plug in the adapter (and install its drivers) and rescan.');
+      } else if (!keep || !found.some(c => c.channel === pcChannel)) {
+        setPcChannel(found[0].channel);
+      }
+    } catch (e) {
+      setPcChannels([]);
+      setPcChanMsg('Scan failed: ' + e.message);
+    } finally {
+      setPcChanScanning(false);
+    }
+  };
+  // Rescan whenever the adapter type changes; keep the saved channel selected
+  // if it's still among the results instead of silently jumping to the first
+  useEffect(() => { if (backendPc && pcIface) scanChannels(pcIface, { keep: true }); }, [backendPc, pcIface]);
+
+  // Live adapter link state for the PC backend — refreshed while Settings is
+  // open so plugging the adapter in/out is visible without a reload
+  useEffect(() => {
+    if (!backendPc) return;
+    let alive = true;
+    const load = () => fetch('/settings').then(r => r.ok ? r.json() : null)
+      .then(s => { if (alive && s) setPcConn({ ok: s.can_connected === true, msg: s.can_status || '' }); }).catch(() => {});
+    load();
+    const t = setInterval(load, 5000);
+    return () => { alive = false; clearInterval(t); };
+  }, [backendPc]);
   // Interface settings as persisted on the device — drives the unsaved-change
   // hint and gates scanning (a scan runs on the SAVED config, not the form)
   const [savedCan, setSavedCan] = useState({ mode: false, speed: 2, rx: 4, tx: 5, pwr: '', pwrInv: false, en: '', enInv: false, uartRx: 1, uartTx: 3 });
@@ -2999,6 +3064,7 @@ const Settings = () => {
 
   useEffect(() => {
     (async () => {
+      let pcBackend = false;
       try {
         const r = await fetch('/settings');
         if (r.ok) {
@@ -3017,6 +3083,15 @@ const Settings = () => {
           setCanPwrPin(pwr); setCanPwrInv(data.can_pwr_inv === true);
           setCanEnPin(en); setCanEnInv(data.can_en_inv === true);
           if (data.arch) setBoardArch(data.arch);
+          if (data.backend === 'pc') {
+            pcBackend = true;
+            setBackendPc(true);
+            setPcIface(data.can_interface || '');
+            setPcChannel(data.can_channel || '');
+            setPcBitrate(data.can_bitrate || 500000);
+            setPcDataDir(data.data_dir || '');
+            setSavedPc({ iface: data.can_interface || '', channel: data.can_channel || '', bitrate: data.can_bitrate || 500000 });
+          }
           setSavedCan({
             mode: data.can_mode === true,
             speed: data.can_speed !== undefined ? data.can_speed : 2,
@@ -3026,8 +3101,8 @@ const Settings = () => {
           });
         }
       } catch (e) { /* use default */ }
-      // Load WiFi info
-      try {
+      // Load WiFi info (never offered by the PC backend)
+      if (!pcBackend) try {
         const r = await fetch('/wifi');
         if (r.ok) {
           const html = await r.text();
@@ -3065,10 +3140,12 @@ const Settings = () => {
   // Unsaved interface changes: mode always counts; speed/pins only matter in
   // CAN mode. Scanning is only meaningful once the device runs the saved
   // CAN config, so the Scan button stays disabled until then.
-  const canDirty = canMode !== savedCan.mode ||
+  const canDirty = backendPc
+    ? (pcIface !== savedPc.iface || pcChannel !== savedPc.channel || pcBitrate !== savedPc.bitrate)
+    : (canMode !== savedCan.mode ||
     (canMode && (canSpeed !== savedCan.speed || canRxPin !== savedCan.rx || canTxPin !== savedCan.tx ||
       canPwrPin !== savedCan.pwr || canPwrInv !== savedCan.pwrInv || canEnPin !== savedCan.en || canEnInv !== savedCan.enInv)) ||
-    uartRxPin !== savedCan.uartRx || uartTxPin !== savedCan.uartTx;
+    uartRxPin !== savedCan.uartRx || uartTxPin !== savedCan.uartTx);
   const scanReady = savedCan.mode && !canDirty;
   // Board presets fill the CAN pins in one go; only offer those built for this
   // chip (ESP32 vs ESP32-S3 have different valid GPIOs)
@@ -3103,31 +3180,41 @@ const Settings = () => {
           <h3>Data Interface</h3>
           <p style="color:var(--text2);font-size:.8rem;margin:0 0 .5rem">How this module talks to the inverter.</p>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:.5rem">
-            <div class="seg" id="iface-seg">
+            ${!backendPc && html`<div class="seg" id="iface-seg">
               <button class=${!canMode ? 'sel' : ''} onclick=${() => setCanMode(false)}>UART (Serial)</button>
               <button class=${canMode ? 'sel' : ''} onclick=${() => setCanMode(true)}>CAN Bus</button>
-            </div>
+            </div>`}
+            ${backendPc && html`<span class="pill info">CAN via python-can</span>`}
             <button id="iface-save" onclick=${async () => {
               setSaving(true);
               try {
                 const bootNode = defaultNodeId();
                 const params = new URLSearchParams();
-                params.set('can_mode', canMode ? '1' : '0');
-                params.set('can_node_id', bootNode);
-                params.set('can_speed', canSpeed);
-                params.set('can_rx_pin', canRxPin);
-                params.set('can_tx_pin', canTxPin);
-                params.set('uart_rx_pin', uartRxPin);
-                params.set('uart_tx_pin', uartTxPin);
-                params.set('can_pwr_pin', canPwrPin); // blank = unused
-                params.set('can_pwr_inv', canPwrInv ? '1' : '0');
-                params.set('can_en_pin', canEnPin);
-                params.set('can_en_inv', canEnInv ? '1' : '0');
-                params.set('can_nodes', JSON.stringify(state.canNodes));
+                if (backendPc) {
+                  params.set('can_node_id', bootNode);
+                  params.set('can_interface', pcIface);
+                  params.set('can_channel', pcChannel);
+                  params.set('can_bitrate', pcBitrate);
+                  params.set('can_nodes', JSON.stringify(state.canNodes));
+                } else {
+                  params.set('can_mode', canMode ? '1' : '0');
+                  params.set('can_node_id', bootNode);
+                  params.set('can_speed', canSpeed);
+                  params.set('can_rx_pin', canRxPin);
+                  params.set('can_tx_pin', canTxPin);
+                  params.set('uart_rx_pin', uartRxPin);
+                  params.set('uart_tx_pin', uartTxPin);
+                  params.set('can_pwr_pin', canPwrPin); // blank = unused
+                  params.set('can_pwr_inv', canPwrInv ? '1' : '0');
+                  params.set('can_en_pin', canEnPin);
+                  params.set('can_en_inv', canEnInv ? '1' : '0');
+                  params.set('can_nodes', JSON.stringify(state.canNodes));
+                }
                 await fetch('/settings?' + params.toString(), { method: 'POST' });
-                dispatch({ type: 'SET_CAN_CONFIG', payload: { canMode, canNodeId: bootNode } });
-                if (canMode) dispatch({ type: 'SET_CAN_NODE', payload: bootNode });
-                setSavedCan({ mode: canMode, speed: canSpeed, rx: canRxPin, tx: canTxPin, pwr: canPwrPin, pwrInv: canPwrInv, en: canEnPin, enInv: canEnInv, uartRx: uartRxPin, uartTx: uartTxPin });
+                dispatch({ type: 'SET_CAN_CONFIG', payload: { canMode: backendPc || canMode, canNodeId: bootNode } });
+                if (backendPc || canMode) dispatch({ type: 'SET_CAN_NODE', payload: bootNode });
+                if (backendPc) setSavedPc({ iface: pcIface, channel: pcChannel, bitrate: pcBitrate });
+                else setSavedCan({ mode: canMode, speed: canSpeed, rx: canRxPin, tx: canTxPin, pwr: canPwrPin, pwrInv: canPwrInv, en: canEnPin, enInv: canEnInv, uartRx: uartRxPin, uartTx: uartTxPin });
                 setTimeout(() => setSaving(false), 2000);
               } catch (e) { setSaving(false); }
             }} style="font-size:.75rem;padding:4px 14px;margin-left:auto;${canDirty ? 'border-color:var(--amber);color:var(--amber)' : ''}" disabled=${saving}><${Icon} n="save" />${saving ? 'Saving...' : 'Save'}</button>
@@ -3164,8 +3251,64 @@ const Settings = () => {
 
           ${canMode && html`
             <p class="settings-subhead">CAN Bus</p>
-            ${boardArch && html`<p style="font-size:.72rem;color:var(--text3);margin:0 0 .35rem">This build: <b>${boardArch}</b></p>`}
-            ${(() => {
+            ${backendPc && html`
+              ${pcConn && html`<p style="margin:0 0 .5rem">
+                <span class="pill ${pcConn.ok ? 'info' : 'danger'}"><span class="dot"></span>${pcConn.ok ? 'Adapter connected' : 'Adapter not connected'}</span>
+                ${!pcConn.ok && pcConn.msg && html` <span style="color:var(--text3);font-size:.75rem">${pcConn.msg}</span>`}
+              </p>`}
+              <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:.25rem;align-items:center">
+                <label style="font-size:.75rem">Adapter <select id="pc-can-interface" class="styled" value=${pcIface} onchange=${e => { setPcIface(e.target.value); setPcChannel(''); setPcManualChannel(false); }} style="font-size:.7rem">
+                    <option value="">— choose —</option>
+                    <option value="socketcan">socketcan (Linux)</option>
+                    <option value="slcan">slcan (serial CAN)</option>
+                    <option value="gs_usb">gs_usb (candleLight)</option>
+                    <option value="pcan">PCAN</option>
+                    <option value="kvaser">Kvaser</option>
+                    <option value="vector">Vector</option>
+                    <option value="virtual">virtual (testing)</option>
+                  </select>
+                </label>
+                <label style="font-size:.75rem">Channel
+                  ${pcIface === 'virtual' ? html`
+                    <input type="text" value=${pcChannel} oninput=${e => setPcChannel(e.target.value)} placeholder="shared name" style="width:11em;padding:2px 4px" />
+                  ` : pcManualChannel ? html`
+                    <input id="pc-can-channel-manual" type="text" value=${pcChannel} oninput=${e => setPcChannel(e.target.value)} placeholder="channel" style="width:11em;padding:2px 4px" />
+                  ` : html`
+                    <select id="pc-can-channel" class="styled" value=${pcChannel} onchange=${e => setPcChannel(e.target.value)} style="font-size:.7rem;min-width:14em" disabled=${!pcIface || pcChanScanning}>
+                      ${!pcIface && html`<option value="">select an adapter first</option>`}
+                      ${pcIface && pcChanScanning && html`<option value="">scanning…</option>`}
+                      ${pcIface && !pcChanScanning && pcChannels.length === 0 && html`<option value="">no channels found</option>`}
+                      ${pcChannels.map(c => html`<option value=${c.channel}>${c.channel}${c.description ? ' — ' + c.description : ''}</option>`)}
+                      ${pcChannel && !pcChannels.some(c => c.channel === pcChannel) && html`<option value=${pcChannel}>${pcChannel} (saved)</option>`}
+                    </select>
+                  `}
+                </label>
+                ${pcIface && pcIface !== 'virtual' && !pcManualChannel && html`
+                  <button onclick=${() => scanChannels(pcIface)} disabled=${pcChanScanning} title="Rescan for channels" style="font-size:.75rem;padding:4px 8px">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+                  </button>
+                `}
+                <label style="font-size:.75rem">Bitrate <select id="pc-can-bitrate" class="styled" value=${pcBitrate} onchange=${e => setPcBitrate(parseInt(e.target.value))} style="font-size:.7rem">
+                    <option value="125000">125k</option>
+                    <option value="250000">250k</option>
+                    <option value="500000">500k</option>
+                    <option value="1000000">1M</option>
+                  </select>
+                </label>
+              </div>
+              ${pcIface && pcIface !== 'virtual' && !pcManualChannel && pcChanMsg && html`
+                <p style="color:var(--text3);font-size:.75rem;margin:0 0 .35rem">
+                  ${pcChanMsg}
+                  ${pcChannels.length === 0 && !pcChanScanning && html` <a href="#" onclick=${e => { e.preventDefault(); setPcManualChannel(true); }}>Enter channel manually</a>`}
+                </p>
+              `}
+              ${pcManualChannel && html`<p style="margin:0 0 .35rem"><a href="#" onclick=${e => { e.preventDefault(); setPcManualChannel(false); scanChannels(pcIface); }} style="font-size:.75rem">← back to detected channels</a></p>`}
+              <p style="color:var(--text2);font-size:.78rem;margin:0 0 .75rem">
+                Pick the adapter type first — the channel list is scanned automatically. App data lives in <code>${pcDataDir || 'the per-user app data folder'}</code>.
+              </p>
+            `}
+            ${!backendPc && boardArch && html`<p style="font-size:.72rem;color:var(--text3);margin:0 0 .35rem">This build: <b>${boardArch}</b></p>`}
+            ${!backendPc && (() => {
               const boards = CAN_BOARD_PRESETS.filter(b => b.arch === boardArch);
               return boards.length ? html`
                 <label style="font-size:.75rem;display:block;margin-bottom:.35rem">Board preset
@@ -3176,6 +3319,7 @@ const Settings = () => {
                   </select>
                 </label>` : '';
             })()}
+            ${!backendPc && html`
             <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:.25rem;align-items:center">
               <label style="font-size:.75rem">Speed <select value=${canSpeed} onchange=${e => setCanSpeed(parseInt(e.target.value))} class="styled" style="font-size:.7rem">
                   <option value="0">125k</option>
@@ -3202,6 +3346,7 @@ const Settings = () => {
             <p style="color:var(--text2);font-size:.78rem;margin:0 0 .75rem">
               For boards that gate transceiver power or standby (e.g. LilyGO T-CAN485: 5V pin 16, enable pin 23 inverted). Each pin is driven to its enable level at boot in CAN mode; <b>invert</b> = drive LOW to enable. Leave blank if not needed.
             </p>
+            `}
 
             <p class="settings-subhead">CAN Devices</p>
             <p style="color:var(--text2);font-size:.78rem;margin:0 0 .5rem">
@@ -3257,6 +3402,7 @@ const Settings = () => {
           `}
         </div>
 
+        ${!backendPc && html`
         <div class="dash-box compact">
           <h3>WiFi</h3>
           ${wifiStatus && wifiStatus.sta_connected ? html`
@@ -3295,6 +3441,7 @@ const Settings = () => {
             is never kicked. ${wifiStatus && html`<b>AP is ${wifiStatus.ap_active ? 'broadcasting' + (wifiStatus.ap_clients ? ' (' + wifiStatus.ap_clients + ' client' + (wifiStatus.ap_clients > 1 ? 's' : '') + ')' : '') : 'off — fallback armed'}.</b>`}
           </p>
         </div>
+        `}
 
         <div class="dash-box compact">
           <h3>Device Name</h3>
@@ -5404,7 +5551,7 @@ const App = () => {
     fetch('/settings').then(r => r.json()).then(data => {
       const mode = data.can_mode === true;
       const nodeId = data.can_node_id || 1;
-      dispatch({ type: 'SET_CAN_CONFIG', payload: { canMode: mode, canNodeId: nodeId } });
+      dispatch({ type: 'SET_CAN_CONFIG', payload: { canMode: mode, canNodeId: nodeId, backendPc: data.backend === 'pc' } });
       if (mode) dispatch({ type: 'SET_CAN_NODE', payload: nodeId });
       if (data.can_nodes) dispatch({ type: 'SET_CAN_NODES', payload: data.can_nodes });
       if (typeof data.dev_name === 'string' && data.dev_name) dispatch({ type: 'SET_DEVICE_NAME', payload: data.dev_name });

@@ -8,3 +8,8 @@ platformio-local-override.ini
 node_modules/
 test-results/
 playwright-report/
+__pycache__/
+*.pyc
+pyapp/.venv/
+pyapp/dist/
+pyapp/.pytest_cache/

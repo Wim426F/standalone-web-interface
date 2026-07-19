@@ -46,6 +46,14 @@ Works with the OpenInverter family of firmware:
 
 ---
 
+## Two ways to run it
+
+**On an ESP32** — flash the firmware below, connect over WiFi. Works over UART or CAN.
+
+**Directly on your PC, no ESP32 needed** — [`pyapp/`](pyapp/) serves this same web interface and talks to the inverter/VCU over a USB CAN adapter via [python-can](https://python-can.readthedocs.io/) (socketcan, slcan, gs_usb/candleLight, PCAN, Kvaser, Vector, ...). See [`pyapp/README.md`](pyapp/README.md).
+
+---
+
 ## Getting started
 
 ### 1. Get an image
