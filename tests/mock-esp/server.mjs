@@ -27,6 +27,7 @@
 //   GET  /__test/spot?name=&value= -> drive a spot value
 //   POST /__test/otainfo         -> merge JSON body into the /otainfo reply
 //   GET  /__test/set-arch?a=     -> reported board arch (blank = omit)
+//   GET  /__test/add-value?name=&value=&unit= -> add a spot value
 //   GET  /__test/can-cache?loaded=0|1 -> CAN param cache state (0 = device offline)
 //   GET  /__test/sse?mode=on|off|404  -> SSE listener: normal / port closed / refuse
 import http from 'node:http';
@@ -367,6 +368,13 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
         const sv = inverter.spot[q.get('name')];
         if (sv) sv.value = parseFloat(q.get('value'));
         return text(sv ? 'ok' : 'unknown');
+      }
+      if (p === '/__test/add-value') { // add a spot value (e.g. long names for 128-char limits)
+        const name = q.get('name');
+        if (!name) return send(400, 'name required');
+        const ids = Object.values(allValues()).map(v => v.id || 0);
+        inverter.spot[name] = { unit: q.get('unit') || '', value: parseFloat(q.get('value') || '0'), isparam: false, id: Math.max(...ids) + 1 };
+        return text('ok');
       }
       if (p === '/__test/otainfo') { // override the board target etc.
         Object.assign(otainfo, JSON.parse(body.toString() || '{}'));
