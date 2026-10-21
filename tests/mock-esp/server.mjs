@@ -26,6 +26,7 @@
 //   POST /__test/put-file?name=  -> seed a SPIFFS file (raw body)
 //   GET  /__test/spot?name=&value= -> drive a spot value
 //   POST /__test/otainfo         -> merge JSON body into the /otainfo reply
+//                                   (its version is also what /version reports)
 //   GET  /__test/set-arch?a=     -> reported board arch (blank = omit)
 //   GET  /__test/add-value?name=&value=&unit= -> add a spot value
 //   GET  /__test/can-cache?loaded=0|1 -> CAN param cache state (0 = device offline)
@@ -517,7 +518,7 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
         sta_connected: true, rssi: -58, ssid: 'mocknet', ip: '192.168.1.42',
         ap_active: !settings.ap_fallback, ap_clients: 0, ap_fallback: settings.ap_fallback,
       }, 'text/json');
-      if (p === '/version') return text('v0.1-mock');
+      if (p === '/version') return text(otainfo.version); // both are WEB_VERSION on the device
       if (p === '/otainfo') return json(otainfo);
       if (p === '/fwupdate-status') return json(fwStatus);
       if (p === '/fwupdate') {

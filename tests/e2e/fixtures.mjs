@@ -56,11 +56,11 @@ export const test = base.extend({
 export { expect };
 
 /** Navigate to the app and wait for the first parameter fetch to land. */
-export async function openApp(page, mock) {
+export async function openApp(page, mock, { version = 'v0.1-mock' } = {}) {
   await page.goto(mock.url);
   await expect(page.locator('.tablink', { hasText: 'Dashboard' })).toBeVisible();
   // App is live once the json poll has populated the store (navbar shows F/W version)
-  await expect(page.locator('#version')).toContainText('Web: v0.1-mock');
+  await expect(page.locator('#version')).toContainText('Web: ' + version);
 }
 
 export async function gotoTab(page, label) {
