@@ -39,7 +39,9 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <WebServer.h>
-#include <HTTPUpdateServer.h>
+#include <Preferences.h>
+#include <SPIFFS.h>
+#include <StreamString.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
 #include <Update.h>
@@ -54,6 +56,10 @@
 #include "src/can_driver.h"
 #include "src/can_protocol.h"
 #include "src/web_logic.h"
+#include "src/web_auth.h"
+#include "esp_timer.h"
+#include <functional>
+#include <vector>
 
 using weblogic::jsonEscape;
 using weblogic::findArrayEnd;
@@ -454,10 +460,150 @@ static float canReadParamValue(int paramId) {
 #endif
 
 WebServer server(80);
-HTTPUpdateServer updater;
 //holds the current upload
 File fsUploadFile;
 Ticker sta_tick;
+
+// ==================== Users & sign-in ====================
+// Opt-in: with no users stored, everything is open exactly as before. The
+// first user (always an admin) switches enforcement on for every entry
+// point: the port-80 router below, the SSE stream on :81 and ArduinoOTA.
+// Accounts live in NVS (namespace "oiauth"), never in SPIFFS, so the static
+// file handler, /list, /edit and the settings export cannot reach them, and
+// a filesystem OTA image does not wipe them. Lockout recovery needs
+// physical access: see authRecoveryTick().
+//
+// PBKDF2 iterations for new password hashes: ~0.2-0.4 s per sign-in on a
+// 240 MHz ESP32 (the debug port prints the measured time on each sign-in).
+// Stored per user, so changing it later doesn't break existing passwords.
+#ifndef AUTH_PBKDF2_ITERATIONS
+#define AUTH_PBKDF2_ITERATIONS 10000
+#endif
+// Hold this pin low (the BOOT button on most boards) for 10 s while running
+// to delete every user. -1 disables the button path.
+#ifndef AUTH_RESET_PIN
+#define AUTH_RESET_PIN 0
+#endif
+#define AUTH_COOKIE "oisess"
+
+static weblogic::UserStore authUsers;
+static weblogic::SessionTable authSessions;
+static weblogic::LoginLimiter authLimiter;
+
+static bool authEnabled() { return authUsers.count > 0; }
+static uint64_t nowMs() { return (uint64_t)(esp_timer_get_time() / 1000); }
+// Hardware RNG (true random while the radio is on, which it always is here)
+static void hwRandom(uint8_t* buf, size_t len) { esp_fill_random(buf, len); }
+
+static void authLoad()
+{
+  authUsers.iterations = AUTH_PBKDF2_ITERATIONS;
+  authUsers.rng = hwRandom;
+  authSessions.rng = hwRandom;
+  Preferences p;
+  if (!p.begin("oiauth", true)) return; // namespace absent: no users yet
+  String s = p.getString("users", "");
+  p.end();
+  if (s.length()) authUsers.parse(s.c_str(), s.length());
+  DBG_OUTPUT_PORT.printf("Auth: %u user(s)%s\n", (unsigned)authUsers.count, authEnabled() ? ", sign-in required" : ", sign-in off");
+}
+
+static bool authSave()
+{
+  Preferences p;
+  if (!p.begin("oiauth", false)) return false;
+  bool ok;
+  if (authUsers.count == 0) ok = p.remove("users") || !p.isKey("users");
+  else {
+    size_t cap = authUsers.serializedSize() + 1;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { p.end(); return false; }
+    authUsers.serialize(buf, cap);
+    ok = p.putString("users", buf) > 0;
+    memset(buf, 0, cap);
+    free(buf);
+  }
+  p.end();
+  return ok;
+}
+
+// Who is asking (filled per request by authIdentify)
+struct AuthReq {
+  int session = -1;
+  weblogic::Role role = weblogic::ROLE_NONE;
+  bool bearer = false;
+  const char* user = nullptr; // points into authUsers
+};
+static AuthReq authReq;
+
+static void authIdentify()
+{
+  authReq = AuthReq();
+  if (!authEnabled()) { authReq.role = weblogic::ROLE_ADMIN; return; } // sign-in off: everyone may do everything
+  char tok[80];
+  String a = server.header("Authorization");
+  bool bearer = weblogic::bearerToken(a.c_str(), tok, sizeof(tok));
+  if (!bearer) {
+    String c = server.header("Cookie");
+    if (!weblogic::cookieValue(c.c_str(), AUTH_COOKIE, tok, sizeof(tok))) return;
+  }
+  int s = authSessions.find(tok, nowMs());
+  if (s < 0) return;
+  int u = authUsers.find(authSessions.s[s].user);
+  // A removed user, or one whose password/role changed since: session over
+  if (u < 0 || authUsers.users[u].gen != authSessions.s[s].userGen) { authSessions.revoke(s); return; }
+  authReq.session = s;
+  authReq.role = authUsers.users[u].role;
+  authReq.bearer = bearer;
+  authReq.user = authUsers.users[u].name;
+}
+
+static bool authCsrfOk()
+{
+  if (!authEnabled()) return true;
+  String origin = server.header("Origin"), referer = server.header("Referer"), x = server.header("X-OI-Auth");
+  String host = server.hostHeader();
+  return weblogic::csrfOk(authReq.bearer, origin.c_str(), referer.c_str(), x.c_str(), host.c_str());
+}
+
+static void authSendError(int code, const char* error, const char* need = nullptr)
+{
+  String body = String("{\"error\":\"") + error + "\"";
+  if (need) body += String(",\"need\":\"") + need + "\"";
+  body += "}";
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(code, "application/json", body);
+}
+
+// Status of the verdict for `need` (0 = allowed). With send, a refusal is
+// answered here: 401 not signed in, 403 role too low or cross-site.
+static int authCheck(weblogic::Perm need, bool send = true)
+{
+  if (need == weblogic::PERM_DENY) { if (send) server.send(404, "text/plain", "FileNotFound"); return 404; }
+  if (!authEnabled() || need == weblogic::PERM_PUBLIC) return 0;
+  if (authReq.session < 0) { if (send) authSendError(401, "sign-in required"); return 401; }
+  if (!weblogic::roleAllows(authReq.role, need)) {
+    if (send) authSendError(403, "your account cannot do this", weblogic::permRoleName(need));
+    return 403;
+  }
+  if (need >= weblogic::PERM_WRITE && !authCsrfOk()) {
+    if (send) authSendError(403, "cross-site request refused");
+    return 403;
+  }
+  return 0;
+}
+
+static void authSetCookie(const char* tokenHex, bool remember)
+{
+  String c = String(AUTH_COOKIE "=") + tokenHex + "; Path=/; HttpOnly; SameSite=Strict";
+  if (remember) c += "; Max-Age=" + String((uint32_t)(weblogic::SESSION_REMEMBER_IDLE_MS / 1000));
+  server.sendHeader("Set-Cookie", c);
+}
+
+static void authClearCookie()
+{
+  server.sendHeader("Set-Cookie", AUTH_COOKIE "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
+}
 
 //SWD bit-banging, ported from https://github.com/scanlime/esp8266-arm-swd
 #include <StreamString.h>
@@ -612,7 +758,9 @@ String getContentType(String filename){
   return "text/plain";
 }
 
-bool handleFileRead(String path){
+// allowSd: also look on the SD card (never for requests served publicly —
+// the public static rule is about the UI's own SPIFFS files)
+bool handleFileRead(String path, bool allowSd = true){
   //DBG_OUTPUT_PORT.println("handleFileRead: " + path);
   // Strip query string (e.g. /ui.js?v=2 -> /ui.js)
   int qs = path.indexOf('?');
@@ -637,7 +785,7 @@ bool handleFileRead(String path){
     return true;
   }
   //try download from the sdcard
-  if (haveSDCard) {
+  if (haveSDCard && allowSd) {
     DBG_OUTPUT_PORT.print("handleFileRead Trying SD Card: ");
     DBG_OUTPUT_PORT.println(path);
     DBG_OUTPUT_PORT.print("SD_MMC.exists: ");
@@ -1116,25 +1264,37 @@ static void sendCommand(String cmd)
 
 // CAN command handler — routes OpenInverter commands over CAN bus
 static String canExecuteCommand(const String& cmdStr, int repeat);
+// The terminal command a /cmd request will actually run. The router
+// classifies exactly this string (weblogic::cmdPerm), so truncation can't
+// make the checked command differ from the executed one. CAN commands
+// aren't bound by the inverter's UART terminal buffer, so allow long ones
+// (many-favourite 'get' lists exceed 128 chars easily).
+static String commandToRun() {
+  return server.arg("cmd").substring(0, canMode ? 1024 : 128);
+}
+
+// Any page may read /cmd while sign-in is off (the old behaviour); with
+// sign-in on, no cross-origin reads at all
+static void sendCmdCors() {
+  if (!authEnabled()) server.sendHeader("Access-Control-Allow-Origin","*");
+}
+
 static void handleCanCommand(const String& cmd) {
   String result = canExecuteCommand(cmd, 0);
-  server.sendHeader("Access-Control-Allow-Origin","*");
+  sendCmdCors();
   server.send(200, "text/json", result);
 }
 
 static void handleCommand() {
-  const int cmdBufSize = 128;
   if(!server.hasArg("cmd")) {server.send(500, "text/plain", "BAD ARGS"); return;}
 
-  // Route through CAN if in CAN mode. CAN commands aren't bound by the
-  // inverter's UART terminal buffer, so allow long ones (many-favourite
-  // 'get' lists exceed 128 chars easily)
+  // Route through CAN if in CAN mode
   if (canMode) {
-    handleCanCommand(server.arg("cmd").substring(0, 1024));
+    handleCanCommand(commandToRun());
     return;
   }
 
-  String cmd = server.arg("cmd").substring(0, cmdBufSize);
+  String cmd = commandToRun();
 
   int repeat = 0;
   String output;
@@ -1235,7 +1395,7 @@ static void handleCommand() {
   // ~2.6 s here, stalling the web server and the SSE stream with it
   DBG_OUTPUT_PORT.println(output);
 #endif
-  server.sendHeader("Access-Control-Allow-Origin","*");
+  sendCmdCors();
   server.send(200, "text/json", output);
 }
 
@@ -2146,8 +2306,13 @@ static void loadSettings()
   }
 }
 
+static void sendSettingsJson();
 static void handleSettings()
 {
+  // Old UIs changed settings with GET too. With sign-in on, GET only reads
+  // (a viewer may GET /settings); changes must be a POST, which the router
+  // lets only an admin make.
+  if (server.method() != HTTP_POST && authEnabled()) { sendSettingsJson(); return; }
   if (server.hasArg("txrx_swap")) {
     // Back-compat for older web UIs that still post the swap toggle — map it
     // onto the pins (swapped = TX3/RX1, normal = TX1/RX3)
@@ -2222,7 +2387,12 @@ static void handleSettings()
       initUART(true); // UART mode: apply any changed RX/TX pins
     }
     server.send(200, "text/json", "{\"result\":\"ok\"}");
-  } else {
+  } else sendSettingsJson();
+}
+
+static void sendSettingsJson()
+{
+  {
     String json = "{\"dev_name\":\"" + jsonEscape(deviceName) + "\"";
     json += ",\"txrx_swapped\":";
     json += txrxSwapped ? "true" : "false";
@@ -2345,17 +2515,30 @@ static uint32_t sseLastSend = 0;
 
 // Value of `key` in the request line's query string ("" if absent)
 
+// With sign-in on, a stream needs a one-time ticket (?t=, from
+// /auth/stream-ticket on port 80) and lives only as long as that session:
+// sign-out, removal or a password/role change ends it on the next tick.
+static int sseSession = -1;
+static uint32_t sseSessionSerial = 0;
+
 static void sseAccept()
 {
   WiFiClient nc = sseServer.available();
   if (!nc) return;
   nc.setTimeout(250);
   String reqLine = nc.readStringUntil('\n');
-  // Drain the header block (deadline-bounded — a stalled client can't wedge loop())
+  // Drain the header block (deadline-bounded — a stalled client can't wedge
+  // loop()), keeping Origin and Host for the CORS answer
+  String origin, host;
   uint32_t t0 = millis();
   while (nc.connected() && millis() - t0 < 250) {
     String line = nc.readStringUntil('\n');
     if (line.length() <= 1) break; // bare "\r" = end of headers
+    line.trim();
+    String lower = line.substring(0, 8);
+    lower.toLowerCase();
+    if (lower.startsWith("origin:")) { origin = line.substring(7); origin.trim(); }
+    else if (lower.startsWith("host:")) { host = line.substring(5); host.trim(); }
   }
   String names = weblogic::queryParam(reqLine, "names");
   // Spot value names only — anything else in the query is refused, so the
@@ -2365,22 +2548,51 @@ static void sseAccept()
     nc.stop();
     return;
   }
+  int slot = -1;
+  uint32_t serial = 0;
+  if (authEnabled()) {
+    String ticket = weblogic::queryParam(reqLine, "t");
+    slot = authSessions.redeemTicket(ticket.c_str(), nowMs(), &serial);
+    if (slot < 0) {
+      nc.print("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+      nc.stop();
+      return;
+    }
+  }
   int ms = weblogic::sseIntervalMs(weblogic::queryParam(reqLine, "ms").toInt());
   if (sseClient && sseClient.connected()) sseClient.stop(); // newest stream wins
   sseNames = names;
   sseIntervalMs = ms;
   sseLastSend = 0;
+  sseSession = slot;
+  sseSessionSerial = serial;
+  // CORS: the page (port 80) reads a stream from port 81. Sign-in off: any
+  // page, as before. Sign-in on: only a page from this same host.
+  String cors;
+  if (!authEnabled()) cors = "Access-Control-Allow-Origin: *\r\n";
+  else if (origin.length() < 100 && weblogic::printableNoSpace(origin.c_str()) &&
+           weblogic::originHostMatches(origin.c_str(), host.c_str()))
+    cors = "Access-Control-Allow-Origin: " + origin + "\r\nVary: Origin\r\n";
   nc.setNoDelay(true);
   nc.print("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
-           "Connection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\nretry: 1000\n\n");
+           "Connection: keep-alive\r\n" + cors + "\r\nretry: 1000\n\n");
   sseClient = nc;
+}
+
+static void sseClose()
+{
+  if (sseClient) sseClient.stop();
+  sseNames = "";
+  sseSession = -1;
 }
 
 static void sseTick()
 {
   sseAccept();
   if (!sseClient) return;
-  if (!sseClient.connected()) { sseClient.stop(); sseNames = ""; return; }
+  if (!sseClient.connected()) { sseClose(); return; }
+  // Sign-in on: the stream ends with its session (cheap: one slot compare)
+  if (authEnabled() && !authSessions.alive(sseSession, sseSessionSerial, nowMs())) { sseClose(); return; }
   if (sseNames.length() == 0) return;
   if (millis() - sseLastSend < sseIntervalMs) return;
   sseLastSend = millis();
@@ -2406,6 +2618,417 @@ static void sseTick()
   sseClient.print("data: " + out + "\n\n");
 }
 
+// ==================== Sign-in endpoints (/auth/*) ====================
+
+static String authArgLower(const char* name, unsigned int maxLen)
+{
+  String v = server.arg(name).substring(0, maxLen);
+  v.trim();
+  v.toLowerCase();
+  return v;
+}
+
+static String authUserJson(const char* name, weblogic::Role role)
+{
+  return String("{\"name\":\"") + jsonEscape(name) + "\",\"role\":\"" + weblogic::roleName(role) + "\"}";
+}
+
+// What the UI needs before anything else: is sign-in on, and who am I
+static void handleAuthState()
+{
+  String j = "{\"enabled\":";
+  j += authEnabled() ? "true" : "false";
+  if (authEnabled() && authReq.session >= 0) {
+    j += ",\"user\":\"" + jsonEscape(authReq.user) + "\",\"role\":\"" + weblogic::roleName(authReq.role) + "\"";
+    const weblogic::Session& s = authSessions.s[authReq.session];
+    j += ",\"remember\":";
+    j += s.remember ? "true" : "false";
+  } else if (!authEnabled()) {
+    j += ",\"user\":null,\"role\":\"admin\""; // sign-in off: everyone can do everything
+  } else {
+    j += ",\"user\":null,\"role\":null";
+  }
+  j += ",\"password_min\":" + String((unsigned)weblogic::PASSWORD_MIN) + "}";
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", j);
+}
+
+static void authStartSession(int userIdx, bool remember)
+{
+  const weblogic::User& u = authUsers.users[userIdx];
+  char tok[weblogic::TOKEN_LEN * 2 + 1];
+  int s = authSessions.create(u.name, u.gen, remember, nowMs(), tok);
+  authReq.session = s;
+  authReq.role = u.role;
+  authReq.user = u.name;
+  authSetCookie(tok, remember);
+  // Scripts and apps (curl, Home Assistant ...) may ask for the token to
+  // send as "Authorization: Bearer"; the browser UI never does, so the
+  // HttpOnly cookie stays out of reach of page scripts
+  if (server.arg("token") == "1") server.sendHeader("X-OI-Token", tok);
+}
+
+static void handleAuthLogin()
+{
+  if (!authEnabled()) { authSendError(400, "sign-in is off: no users are set up"); return; }
+  if (!authCsrfOk()) { authSendError(403, "cross-site request refused"); return; }
+  String name = authArgLower("user", 40);
+  String pw = server.arg("password").substring(0, weblogic::PASSWORD_MAX + 1);
+  uint32_t ip = (uint32_t)server.client().remoteIP();
+  uint32_t wait = 0;
+  if (!authLimiter.allowed(ip, name.c_str(), nowMs(), &wait)) {
+    server.sendHeader("Retry-After", String(wait));
+    authSendError(429, "too many attempts, wait a few minutes");
+    return;
+  }
+  uint32_t t0 = millis();
+  int u = authUsers.verify(name.c_str(), pw.c_str());
+  DBG_OUTPUT_PORT.printf("Auth: sign-in check took %u ms\n", (unsigned)(millis() - t0));
+  if (u < 0) {
+    authLimiter.failure(ip, name.c_str(), nowMs());
+    authSendError(401, "incorrect user name or password");
+    return;
+  }
+  authLimiter.success(ip, nowMs());
+  authStartSession(u, server.arg("remember") == "1");
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", "{\"ok\":true,\"user\":" + authUserJson(authUsers.users[u].name, authUsers.users[u].role) + "}");
+}
+
+static void handleAuthLogout()
+{
+  if (!authCsrfOk()) { authSendError(403, "cross-site request refused"); return; }
+  if (authReq.session >= 0) authSessions.revoke(authReq.session);
+  authClearCookie();
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// After any change to the user table
+static void authUsersChanged(const char* who)
+{
+  authSave();
+  if (who) authSessions.revokeUser(who);
+}
+
+// Change your own password: needs the current one (rate-limited like
+// sign-in, since it is a password check too). Ends your other sessions.
+static void handleAuthPassword()
+{
+  if (!authEnabled() || authReq.session < 0) { authSendError(400, "sign-in is off"); return; }
+  if (!authCsrfOk()) { authSendError(403, "cross-site request refused"); return; }
+  String me = authReq.user;
+  uint32_t ip = (uint32_t)server.client().remoteIP();
+  uint32_t wait = 0;
+  if (!authLimiter.allowed(ip, me.c_str(), nowMs(), &wait)) {
+    server.sendHeader("Retry-After", String(wait));
+    authSendError(429, "too many attempts, wait a few minutes");
+    return;
+  }
+  String oldPw = server.arg("old").substring(0, weblogic::PASSWORD_MAX + 1);
+  String newPw = server.arg("new");
+  if (authUsers.verify(me.c_str(), oldPw.c_str()) < 0) {
+    authLimiter.failure(ip, me.c_str(), nowMs());
+    authSendError(403, "current password is incorrect");
+    return;
+  }
+  bool remember = authSessions.s[authReq.session].remember;
+  weblogic::UserResult r = authUsers.setPassword(me.c_str(), newPw.c_str());
+  if (r != weblogic::USER_OK) { authSendError(400, weblogic::userResultText(r)); return; }
+  authUsersChanged(me.c_str());
+  authStartSession(authUsers.find(me.c_str()), remember); // this browser stays signed in
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// Admin user management. GET lists; POST op=add|remove|role|password.
+// With sign-in off this is how the first account (an admin) is created,
+// which switches sign-in on and signs its creator in.
+static void handleAuthUsers()
+{
+  if (server.method() != HTTP_POST) {
+    String j = "{\"enabled\":";
+    j += authEnabled() ? "true" : "false";
+    j += ",\"me\":";
+    j += authReq.user ? "\"" + jsonEscape(authReq.user) + "\"" : String("null");
+    j += ",\"max\":" + String((unsigned)weblogic::USER_MAX) + ",\"users\":[";
+    for (size_t i = 0; i < authUsers.count; i++) {
+      if (i) j += ",";
+      j += authUserJson(authUsers.users[i].name, authUsers.users[i].role);
+    }
+    j += "]}";
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", j);
+    return;
+  }
+  if (!authCsrfOk()) { authSendError(403, "cross-site request refused"); return; }
+  String op = server.arg("op");
+  String name = authArgLower("user", 40);
+  weblogic::Role role = weblogic::roleFromName(server.arg("role").c_str());
+  const char* actor = authReq.user;
+  String actorName = actor ? actor : "";
+  weblogic::UserResult r;
+  bool wasEnabled = authEnabled();
+  if (op == "add") {
+    if (!wasEnabled && role != weblogic::ROLE_ADMIN) r = weblogic::USER_FIRST_MUST_BE_ADMIN;
+    else r = authUsers.add(name.c_str(), server.arg("password").c_str(), role);
+    if (r == weblogic::USER_OK) authUsersChanged(nullptr);
+  } else if (op == "remove") {
+    r = authUsers.remove(name.c_str(), actor);
+    if (r == weblogic::USER_OK) authUsersChanged(name.c_str());
+  } else if (op == "role") {
+    r = authUsers.setRole(name.c_str(), role, actor);
+    if (r == weblogic::USER_OK) authUsersChanged(name.c_str());
+  } else if (op == "password") {
+    r = authUsers.setPassword(name.c_str(), server.arg("password").c_str());
+    if (r == weblogic::USER_OK) authUsersChanged(name.c_str());
+  } else {
+    authSendError(400, "op must be add, remove, role or password");
+    return;
+  }
+  if (r != weblogic::USER_OK) {
+    authSendError(r == weblogic::USER_NOT_FOUND ? 404 : r == weblogic::USER_EXISTS ? 409 : 400, weblogic::userResultText(r));
+    return;
+  }
+  if (!wasEnabled && authEnabled()) {
+    // Sign-in just switched on: sign the creator in, and drop what the open
+    // mode allowed — an unauthenticated SSE stream, ArduinoOTA (loop() stops
+    // serving it), stale sessions
+    DBG_OUTPUT_PORT.println("Auth: first user created, sign-in is now required");
+    authSessions.revokeAll();
+    sseClose();
+    authStartSession(authUsers.find(name.c_str()), false);
+  } else if (actor && (op == "password" || op == "role") && name == actorName) {
+    // Admin reset their own password from the list: stay signed in here
+    int me = authUsers.find(actorName.c_str());
+    if (me >= 0) authStartSession(me, false);
+  }
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// One-time ticket for the SSE stream on the other port
+static void handleStreamTicket()
+{
+  char t[weblogic::TICKET_LEN * 2 + 1] = "";
+  if (authEnabled() && !authSessions.issueTicket(authReq.session, nowMs(), t)) {
+    authSendError(401, "sign-in required");
+    return;
+  }
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", String("{\"ticket\":\"") + t + "\"}");
+}
+
+// ==================== Lockout recovery ====================
+// Forgotten admin password? Every path needs the hardware in hand:
+//   - hold the BOOT button (AUTH_RESET_PIN) for 10 s while it runs, or
+//   - type "auth reset" + Enter on the debug serial port (115200 baud), or
+//   - erase the flash over USB and reflash.
+// The first two delete every user (sign-in off again, exactly like a fresh
+// device) and reboot; settings, layouts and WiFi are kept.
+static void authRecoveryReset(const char* how)
+{
+  DBG_OUTPUT_PORT.printf("Auth: all users deleted (%s), rebooting with sign-in off\n", how);
+  authUsers.count = 0;
+  authSave();
+  authSessions.revokeAll();
+  delay(200);
+  ESP.restart();
+}
+
+static bool authResetPinUsable()
+{
+#if AUTH_RESET_PIN >= 0
+  // Never read a pin the UART link or the CAN transceiver is wired to
+  const int pin = AUTH_RESET_PIN;
+  return pin != uartRxPin && pin != uartTxPin && pin != canRxPin && pin != canTxPin &&
+         pin != canPwrPin && pin != canEnPin;
+#else
+  return false;
+#endif
+}
+
+static void authRecoveryTick()
+{
+  static char line[24];
+  static uint8_t len = 0;
+  while (DBG_OUTPUT_PORT.available()) {
+    int c = DBG_OUTPUT_PORT.read();
+    if (c == '\r' || c == '\n') {
+      line[len] = 0;
+      if (len && strcmp(line, "auth reset") == 0) {
+        if (authEnabled()) authRecoveryReset("serial");
+        else DBG_OUTPUT_PORT.println("Auth: no users, nothing to reset");
+      }
+      len = 0;
+    } else if (len < sizeof(line) - 1) line[len++] = (char)c;
+    else len = 0; // line noise longer than any command: start over
+  }
+#if AUTH_RESET_PIN >= 0
+  static bool pinReady = false, seenHigh = false;
+  static uint32_t lowSince = 0;
+  if (!authEnabled() || !authResetPinUsable()) return;
+  if (!pinReady) { pinMode(AUTH_RESET_PIN, INPUT_PULLUP); pinReady = true; return; }
+  if (digitalRead(AUTH_RESET_PIN)) { seenHigh = true; lowSince = 0; return; }
+  if (!seenHigh) return; // held from boot, or wired low: not a button press
+  if (!lowSince) { lowSince = millis() | 1; DBG_OUTPUT_PORT.println("Auth: keep holding BOOT for 10 s to delete all users"); }
+  else if (millis() - lowSince > 10000) authRecoveryReset("button");
+#endif
+}
+
+// ==================== /update: plain firmware upload page ====================
+// Replaces HTTPUpdateServer (whose own handlers would bypass the router):
+// the bare upload form for a device whose filesystem has no UI yet. Admin.
+static bool plainOtaOk = false;
+static void handlePlainUpdatePage()
+{
+  server.send(200, "text/html",
+    "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body>"
+    "<form method='POST' enctype='multipart/form-data'>Firmware:<br><input type='file' accept='.bin' name='firmware'>"
+    "<input type='submit' value='Update Firmware'></form>"
+    "<form method='POST' enctype='multipart/form-data'>FileSystem:<br><input type='file' accept='.bin' name='filesystem'>"
+    "<input type='submit' value='Update FileSystem'></form></body></html>");
+}
+static void handlePlainUpdateUpload()
+{
+  HTTPUpload& up = server.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    plainOtaOk = up.name == "filesystem" ? Update.begin(SPIFFS.totalBytes(), U_SPIFFS)
+                                         : Update.begin((ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000, U_FLASH);
+  } else if (up.status == UPLOAD_FILE_WRITE && plainOtaOk) {
+    if (Update.write(up.buf, up.currentSize) != up.currentSize) plainOtaOk = false;
+  } else if (up.status == UPLOAD_FILE_END && plainOtaOk) {
+    plainOtaOk = Update.end(true);
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    Update.abort();
+    plainOtaOk = false;
+  }
+}
+static void handlePlainUpdateDone()
+{
+  if (!plainOtaOk) { server.send(200, "text/html", String("Update error: ") + Update.errorString()); return; }
+  server.send(200, "text/html", "<META http-equiv=\"refresh\" content=\"15;URL=/\">Update Success! Rebooting...");
+  delay(100);
+  ESP.restart();
+}
+
+// ==================== The router: one gate for every port-80 request ====================
+// A single RequestHandler that claims every request, so nothing reaches a
+// handler without the permission check — not a route added later (route()
+// takes no permission: it comes from weblogic::ROUTES, and a path missing
+// there is admin-only), not the static file fallback, not an upload. Uploads
+// are checked at UPLOAD_FILE_START, before any byte is written or flashed.
+// Never call server.on()/onNotFound() directly: the router stands in front
+// of all other handlers, so they would never run.
+struct Route {
+  const char* path;
+  uint8_t methods;
+  std::function<void()> fn;
+  std::function<void()> upload;
+};
+static std::vector<Route> routes;
+static std::function<void()> routeNotFound;
+
+static void route(const char* path, uint8_t methods, std::function<void()> fn, std::function<void()> upload = nullptr)
+{
+  if (!weblogic::routeKnown(path, methods))
+    DBG_OUTPUT_PORT.printf("ROUTE %s missing from weblogic::ROUTES: admin-only until it is added\n", path);
+  routes.push_back({ path, methods, fn, upload });
+}
+
+static uint8_t methodBit(HTTPMethod m)
+{
+  switch (m) {
+    case HTTP_GET: return weblogic::M_GET;
+    case HTTP_POST: return weblogic::M_POST;
+    case HTTP_PUT: return weblogic::M_PUT;
+    case HTTP_DELETE: return weblogic::M_DELETE;
+    default: return weblogic::M_OTHER;
+  }
+}
+
+class AuthRouter : public RequestHandler {
+public:
+  // Called at the request line, before headers are read: reset per-request state
+  bool canHandle(HTTPMethod method, String uri) override {
+    (void)method; (void)uri;
+    _uploadRefused = 0;
+    _identified = false;
+    return true;
+  }
+
+  bool canUpload(String uri) override {
+    const Route* r = match(weblogic::M_POST, uri);
+    return r && r->upload;
+  }
+
+  void upload(WebServer& srv, String uri, HTTPUpload& up) override {
+    (void)srv;
+    const Route* r = match(weblogic::M_POST, uri);
+    if (!r || !r->upload) return;
+    if (up.status == UPLOAD_FILE_START) {
+      identify();
+      weblogic::Perm need = needFor(weblogic::M_POST, uri, r);
+      if (need == weblogic::PERM_FILE) {
+        String fn = up.filename;
+        need = weblogic::filePerm(fn.c_str());
+        if (need < weblogic::PERM_WRITE) need = weblogic::PERM_WRITE;
+      }
+      int st = authCheck(need, false);
+      _fileAllowed = st == 0;
+      if (st && !_uploadRefused) { _uploadRefused = st; _refusedNeed = need; }
+    }
+    if (_fileAllowed) r->upload();
+  }
+
+  bool handle(WebServer& srv, HTTPMethod method, String uri) override {
+    (void)srv;
+    uint8_t mb = methodBit(method);
+    const Route* r = match(mb, uri);
+    identify();
+    if (_uploadRefused) { authCheck(_refusedNeed); return true; } // answer the refusal the upload got
+    weblogic::Perm need = needFor(mb, uri, r);
+    if (need == weblogic::PERM_CMD) need = weblogic::cmdPerm(commandToRun().c_str());
+    if (need == weblogic::PERM_FILE) {
+      need = weblogic::PERM_WRITE;
+      if (mb != weblogic::M_POST && server.args() > 0) {
+        weblogic::Perm fp = weblogic::filePerm(server.arg(0).c_str());
+        if (fp > need) need = fp;
+      }
+    }
+    if (authCheck(need)) return true;
+    if (r) { r->fn(); return true; }
+    _publicStatic = (need == weblogic::PERM_PUBLIC);
+    routeNotFound();
+    return true;
+  }
+
+  static bool publicStatic() { return _publicStatic; }
+
+private:
+  static bool _publicStatic;
+  int _uploadRefused = 0;
+  weblogic::Perm _refusedNeed = weblogic::PERM_ADMIN;
+  bool _fileAllowed = false;
+  bool _identified = false;
+
+  void identify() { if (!_identified) { authIdentify(); _identified = true; } }
+
+  static const Route* match(uint8_t mb, const String& uri) {
+    for (const Route& r : routes)
+      if ((r.methods & mb) && uri == r.path) return &r;
+    return nullptr;
+  }
+
+  // Routes: their table entry (a registered path missing there: admin).
+  // Anything else is a static file.
+  static weblogic::Perm needFor(uint8_t mb, const String& uri, const Route* r) {
+    if (!r) return weblogic::staticPerm(uri.c_str());
+    const weblogic::RouteRule* rule = weblogic::findRoute(mb, uri.c_str());
+    return rule ? rule->perm : weblogic::PERM_ADMIN;
+  }
+};
+bool AuthRouter::_publicStatic = false;
+static AuthRouter authRouter;
+
 void setup(void){
   DBG_OUTPUT_PORT.begin(115200);
   //Inverter.setRxBufferSize(50000);
@@ -2415,6 +3038,7 @@ void setup(void){
   // Initialize SPIFFS early so we can load settings before UART init
   SPIFFS.begin();
   loadSettings();
+  authLoad(); // users (NVS): decides whether sign-in is required
   canVirtualLoad();
   canDriverSetRxHook(canVirtualRxHook);
   initUART(); 
@@ -2518,33 +3142,51 @@ void setup(void){
 
   MDNS.begin(mdnsHost.c_str());
 
-  updater.setup(&server);
-
   //SERVER INIT
+  // ArduinoOTA (port 3232) has no notion of users: it runs only while
+  // sign-in is off. With users, update through the Update tab (admin).
   ArduinoOTA.setHostname(mdnsHost.c_str());
-  ArduinoOTA.begin();
-  //list directory
-  server.on("/list", HTTP_GET, handleFileList);
+  if (!authEnabled()) ArduinoOTA.begin();
+  else DBG_OUTPUT_PORT.println("ArduinoOTA off: sign-in is on");
 
-  server.on("/rtc/now", HTTP_GET, handleRTCNow);
-  server.on("/rtc/set", HTTP_POST, handleRTCSet);
-  server.on("/sdcard/list", HTTP_GET, handleSdCardList);
-  server.on("/sdcard/deleteAll", HTTP_GET, handleSdCardDeleteAll);
+  // Every request passes the router (permission check), which needs these
+  // request headers kept; Authorization is always kept by the WebServer
+  static const char* authHeaders[] = { "Cookie", "Origin", "Referer", "X-OI-Auth" };
+  server.collectHeaders(authHeaders, 4);
+  server.addHandler(&authRouter);
+
+  // Sign-in
+  route("/auth/state", weblogic::M_GET, handleAuthState);
+  route("/auth/login", weblogic::M_POST, handleAuthLogin);
+  route("/auth/logout", weblogic::M_POST, handleAuthLogout);
+  route("/auth/password", weblogic::M_POST, handleAuthPassword);
+  route("/auth/users", weblogic::M_GET | weblogic::M_POST, handleAuthUsers);
+  route("/auth/stream-ticket", weblogic::M_GET, handleStreamTicket);
+  // Bare firmware upload page (formerly HTTPUpdateServer)
+  route("/update", weblogic::M_GET, handlePlainUpdatePage);
+  route("/update", weblogic::M_POST, handlePlainUpdateDone, handlePlainUpdateUpload);
+  //list directory
+  route("/list", weblogic::M_GET, handleFileList);
+
+  route("/rtc/now", weblogic::M_GET, handleRTCNow);
+  route("/rtc/set", weblogic::M_POST, handleRTCSet);
+  route("/sdcard/list", weblogic::M_GET, handleSdCardList);
+  route("/sdcard/deleteAll", weblogic::M_GET, handleSdCardDeleteAll);
 
   //load editor
-  server.on("/edit", HTTP_GET, [](){
+  route("/edit", weblogic::M_GET, [](){
     if(!handleFileRead("/edit.htm")) server.send(404, "text/plain", "FileNotFound");
   });
   //create file
-  server.on("/edit", HTTP_PUT, handleFileCreate);
+  route("/edit", weblogic::M_PUT, handleFileCreate);
   //delete file
-  server.on("/edit", HTTP_DELETE, handleFileDelete);
+  route("/edit", weblogic::M_DELETE, handleFileDelete);
   //first callback is called after the request has ended with all parsed arguments
   //second callback handles file uploads at that location
-  server.on("/edit", HTTP_POST, [](){ server.send(200, "text/plain", ""); }, handleFileUpload);
+  route("/edit", weblogic::M_POST, [](){ server.send(200, "text/plain", ""); }, handleFileUpload);
 
   //ESP32 self-update: flash app firmware or the SPIFFS filesystem from the browser
-  server.on("/espupdate", HTTP_POST, [](){
+  route("/espupdate", weblogic::M_POST, [](){
     if(espOtaUploadRejected){
       espOtaUploadRejected = false;
       server.send(409, "application/json", "{\"ok\":false,\"message\":\"URL update already in progress\"}");
@@ -2560,32 +3202,32 @@ void setup(void){
   }, handleEspUpdateUpload);
 
   //ESP32 self-update by downloading a combined OTA image from a URL (server-side, no browser CORS)
-  server.on("/espupdate-url", HTTP_POST, handleEspUpdateFromUrl);
-  server.on("/espupdate-status", HTTP_GET, [](){
+  route("/espupdate-url", weblogic::M_POST, handleEspUpdateFromUrl);
+  route("/espupdate-status", weblogic::M_GET, [](){
     String msg = (espOtaDlState == 3) ? espOtaErr : "";   // only read the String once the task is done writing it
     server.send(200, "application/json",
       String("{\"state\":") + espOtaDlState + ",\"pct\":" + espOtaDlPct + ",\"message\":\"" + msg + "\"}");
   });
 
-  server.on("/wifi", handleWifi);
-  server.on("/wifi-status", HTTP_GET, handleWifiStatus);
-  server.on("/cmd", handleCommand);
-  server.on("/fwupdate", handleUpdate);
-  server.on("/can-fwupdate", handleCanFwUpdate);
-  server.on("/fwupdate-status", handleCanFwStatus);
-  server.on("/baud", handleBaud);
-  server.on("/settings", HTTP_GET, handleSettings);
-  server.on("/settings", HTTP_POST, handleSettings);
+  route("/wifi", weblogic::M_ANY, handleWifi);
+  route("/wifi-status", weblogic::M_GET, handleWifiStatus);
+  route("/cmd", weblogic::M_ANY, handleCommand);
+  route("/fwupdate", weblogic::M_ANY, handleUpdate);
+  route("/can-fwupdate", weblogic::M_ANY, handleCanFwUpdate);
+  route("/fwupdate-status", weblogic::M_ANY, handleCanFwStatus);
+  route("/baud", weblogic::M_ANY, handleBaud);
+  route("/settings", weblogic::M_GET, handleSettings);
+  route("/settings", weblogic::M_POST, handleSettings);
   #ifndef WEB_VERSION
 #define WEB_VERSION "dev"
 #endif
-  server.on("/version", [](){ server.send(200, "text/plain", WEB_VERSION); });
-  server.on("/otainfo", [](){
+  route("/version", weblogic::M_ANY, [](){ server.send(200, "text/plain", WEB_VERSION); });
+  route("/otainfo", weblogic::M_ANY, [](){
     server.send(200, "application/json",
       String("{\"version\":\"") + WEB_VERSION + "\",\"repo\":\"" + WEB_REPO + "\",\"target\":\"" + WEB_OTA_TARGET + "\"}");
   });
-  server.on("/reboot", [](){ server.send(200, "text/plain", "Rebooting..."); ESP.restart(); });
-  server.on("/reset-inverter", [](){
+  route("/reboot", weblogic::M_ANY, [](){ server.send(200, "text/plain", "Rebooting..."); ESP.restart(); });
+  route("/reset-inverter", weblogic::M_ANY, [](){
     if (canFwBusy()) { server.send(409, "text/plain", "CAN firmware update in progress"); return; }
     server.send(200, "text/plain", "Inverter reset sent");
     if (canMode) {
@@ -2601,7 +3243,7 @@ void setup(void){
     fastUartAvailable = true;
     fastUartAttempts = 0;
   });
-  server.on("/can-send", [](){
+  route("/can-send", weblogic::M_ANY, [](){
     if (canFwBusy()) { server.send(409, "text/json", "{\"error\":\"CAN firmware update in progress\"}"); return; }
     if (!server.hasArg("canId")) {
       server.send(400, "text/json", "{\"error\":\"Missing canId\"}");
@@ -2635,7 +3277,7 @@ void setup(void){
     resp += "}";
     server.send(200, "text/json", resp);
   });
-  server.on("/can-scan", [](){
+  route("/can-scan", weblogic::M_ANY, [](){
     if (!canMode) {
       server.send(400, "text/json", "{\"error\":\"CAN mode not enabled\"}");
       return;
@@ -2675,23 +3317,23 @@ void setup(void){
   });
   // UI layout files: return empty defaults instead of 404 when not yet saved
   // (avoids console noise on fresh filesystems)
-  server.on("/favorites.json", [](){
+  route("/favorites.json", weblogic::M_ANY, [](){
     if (!handleFileRead("/favorites.json")) server.send(200, "application/json", "{\"p\":[],\"s\":[]}");
   });
-  server.on("/gauges.json", [](){
+  route("/gauges.json", weblogic::M_ANY, [](){
     if (!handleFileRead("/gauges.json")) server.send(200, "application/json", "{\"items\":[]}");
   });
-  server.on("/plots.json", [](){
+  route("/plots.json", weblogic::M_ANY, [](){
     if (!handleFileRead("/plots.json")) server.send(200, "application/json", "{\"plots\":[]}");
   });
-  server.on("/virtualvals.json", [](){
+  route("/virtualvals.json", weblogic::M_ANY, [](){
     if (!handleFileRead("/virtualvals.json")) server.send(200, "application/json", "{\"items\":[]}");
   });
-  server.on("/virtual-reload", [](){
+  route("/virtual-reload", weblogic::M_ANY, [](){
     canVirtualLoad();
     server.send(200, "application/json", "{\"count\":" + String(virtCount) + "}");
   });
-  server.on("/can-debug", [](){
+  route("/can-debug", weblogic::M_ANY, [](){
     if (canFwBusy()) { server.send(409, "text/json", "{\"error\":\"CAN firmware update in progress\"}"); return; }
     // ?reset=1: reset the device and capture all frames seen on the bus for 8s
     // (diagnoses whether a CAN bootloader announces itself after reset)
@@ -2750,7 +3392,7 @@ void setup(void){
                ",\"head\":\"" + head + "\"}";
     server.send(200, "text/json", r);
   });
-  server.on("/set-can-node", [](){
+  route("/set-can-node", weblogic::M_ANY, [](){
     if (canFwBusy()) { server.send(409, "text/plain", "CAN firmware update in progress"); return; }
     if (server.hasArg("id")) {
       canNodeId = server.arg("id").toInt();
@@ -2773,13 +3415,15 @@ void setup(void){
   
   //called when the url is not defined here
   //use it to load content from SPIFFS
-  server.onNotFound([](){
-    if(!handleFileRead(server.uri()))
+  // Static files (the router has already checked them: UI assets public,
+  // everything else needs a signed-in user)
+  routeNotFound = [](){
+    if(!handleFileRead(server.uri(), !AuthRouter::publicStatic() || !authEnabled()))
     {
       server.sendHeader("Refresh", "6; url=/update");
       server.send(404, "text/plain", "FileNotFound");
     }
-  });
+  };
 
   server.begin();
   server.client().setNoDelay(1);
@@ -2857,7 +3501,10 @@ void loop(void){
 
   // note: ArduinoOTA.handle() calls MDNS.update();
   server.handleClient();
-  ArduinoOTA.handle();
+  // Not begun at all when users existed at boot; stops being served the
+  // moment the first user is created
+  if (!authEnabled()) ArduinoOTA.handle();
+  authRecoveryTick();
 
   // SSE value stream (gauges page). Never while binary logging owns the
   // UART at its own baud rate — though logging only runs with no WiFi
