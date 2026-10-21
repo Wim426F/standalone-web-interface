@@ -6,15 +6,25 @@ import { createMockEsp } from '../mock-esp/server.mjs';
 
 export const test = base.extend({
   mock: async ({}, use) => {
-    const { server, url } = await createMockEsp();
+    const { close, url, ssePort } = await createMockEsp();
     await use({
       url,
+      ssePort,
       commands: async () => (await fetch(url + '/__test/commands')).json(),
       state: async () => (await fetch(url + '/__test/state')).json(),
       setFwStatus: async (s) => fetch(url + '/__test/fw-status', { method: 'POST', body: JSON.stringify(s) }),
+      /** Drive a spot value on the simulated inverter. */
+      setSpot: async (name, value) => fetch(url + `/__test/spot?name=${name}&value=${value}`),
+      /** Seed a SPIFFS file (string or object → JSON). */
+      putFile: async (name, content) => fetch(url + '/__test/put-file?name=' + encodeURIComponent(name), {
+        method: 'POST', body: typeof content === 'string' ? content : JSON.stringify(content),
+      }),
+      /** Switch the device into CAN mode before the page loads (as a saved setting). */
+      enableCan: async () => fetch(url + '/settings?can_mode=1', { method: 'POST' }),
+      /** SSE listener state: 'on', 'off' (port refuses connections) or '404'. */
+      setSse: async (mode) => fetch(url + '/__test/sse?mode=' + mode),
     });
-    server.closeAllConnections?.(); // an open SSE stream would otherwise hold the server up
-    server.close();
+    await close(); // also drops any open SSE stream, which would hold the server up
   },
   page: async ({ page }, use) => {
     // Stub out the PWA service worker: on localhost (a secure context) it

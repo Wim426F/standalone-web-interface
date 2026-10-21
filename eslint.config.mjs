@@ -74,7 +74,9 @@ export default [
         setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly', clearInterval: 'readonly',
         // page.evaluate/addInitScript callbacks execute in the browser
         document: 'readonly', window: 'readonly', localStorage: 'readonly', getComputedStyle: 'readonly',
-        navigator: 'readonly', Promise: 'readonly',
+        navigator: 'readonly', Promise: 'readonly', requestAnimationFrame: 'readonly',
+        // Node 18+ web globals used by the mock contract tests
+        FormData: 'readonly', Blob: 'readonly',
       },
     },
     rules: {

@@ -1,18 +1,28 @@
 name: Tests
 
 # Contributor safety net. Everything here is deterministic and secret-free,
-# so it runs on fork PRs too. Firmware compilation is covered separately by
-# build.yml; this workflow gates code quality and app behaviour.
+# so it runs on fork PRs too: lint + asset sync, the Playwright E2E suite
+# against the mock ESP, and a compile of every PlatformIO environment plus
+# the SPIFFS image. Release images are built by build.yml.
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+# A newer push to the same branch/PR supersedes the running checks
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   static-checks:
     name: Lint + asset sync
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -31,11 +41,12 @@ jobs:
         run: node --check data/app.js && node --check data/sw.js
 
       - name: data/*.gz in sync with sources
-        run: python gzip_assets.py --check
+        run: npm run check:gz
 
   e2e:
     name: E2E (Playwright vs mock ESP)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -47,16 +58,104 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Install Playwright browser
-        run: npx playwright install chromium --with-deps
+      # Browser binaries are keyed on the exact Playwright version, so a
+      # dependency bump re-downloads them; OS packages are always installed
+      # (they live outside the cached directory).
+      - name: Resolve Playwright version
+        id: pw
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
 
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
+      - name: Install Playwright browser
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright system dependencies
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      # CI=true (set by Actions) switches playwright.config.mjs to retries=2,
+      # the html + github reporters and first-failure traces
       - name: Run E2E suite
         run: npx playwright test
 
-      - name: Upload traces on failure
-        if: failure()
+      - name: Upload Playwright report
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+      - name: Upload traces and screenshots
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: playwright-traces
           path: test-results/
           retention-days: 7
+
+  firmware:
+    name: Firmware (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [esp32_wemos, esp32_wemos_debug, esp32_t2can, esp32_t2can_debug]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # version.py derives WEB_VERSION from git describe
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: .github/workflows/tests.yml
+
+      # Toolchains/frameworks differ per chip (esp32 vs esp32s3), so the
+      # package cache is per environment
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.platformio
+          key: pio-pkgs-${{ runner.os }}-${{ matrix.env }}-${{ hashFiles('platformio.ini', 'boards/**') }}
+          restore-keys: |
+            pio-pkgs-${{ runner.os }}-${{ matrix.env }}-
+
+      # Build dir: restore the newest previous build for incremental compiles
+      - name: Cache PlatformIO build dir
+        uses: actions/cache@v6
+        with:
+          path: .pio
+          key: pio-build-${{ runner.os }}-${{ matrix.env }}-${{ hashFiles('platformio.ini') }}-${{ github.sha }}
+          restore-keys: |
+            pio-build-${{ runner.os }}-${{ matrix.env }}-${{ hashFiles('platformio.ini') }}-
+
+      - name: Install PlatformIO
+        # same pin as build.yml / local builds
+        run: pip install "platformio==6.1.19"
+
+      - name: Compile
+        run: pio run -e ${{ matrix.env }}
+
+      - name: Firmware size
+        run: pio run -e ${{ matrix.env }} -t size | tail -n 20
+
+      # Catches a data/ tree that doesn't fit or won't pack (one env is
+      # enough: the image content is the same for every target)
+      - name: Build SPIFFS image
+        if: matrix.env == 'esp32_wemos'
+        run: pio run -e esp32_wemos -t buildfs
+
+      # gzip_assets.py runs as a pre-script and rewrites stale data/*.gz —
+      # the build must not have had to change anything that's committed
+      - name: Build left the tree clean
+        run: git diff --exit-code -- data/

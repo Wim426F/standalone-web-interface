@@ -55,10 +55,23 @@ test('my feature', async ({ page, mock }) => {
 If you add UI behaviour, add a spec. If you fix a bug, add the spec that
 would have caught it.
 
+- The mock must answer like the firmware does: when a handler in
+  `esp32-web-interface.ino` changes its reply, update the mock and
+  `tests/e2e/mock-contract.spec.mjs` with it. `mock.enableCan()` switches it
+  to the CAN backend's reply formats; the SSE stream runs on its own port
+  (`mock.ssePort`), like the firmware's :81 listener.
+- Wait on state, not time: `expect(...)`/`expect.poll(...)` on the DOM or
+  `mock.state()`. Locally tests run with no retries so flakes show up; CI
+  retries twice and reports passes-on-retry as flaky.
+- A known app bug gets a `test.fixme` with a comment naming the code, so it
+  is tracked and flips to a real test once fixed.
+
 ## Firmware changes
 
-`build.yml` compiles both targets (`esp32_wemos`, `esp32_t2can`) on every PR
-— a change that doesn't compile for either board will fail CI. Test on real
+`tests.yml` compiles all four PlatformIO environments (release and debug for
+`esp32_wemos` and `esp32_t2can`) and builds the SPIFFS image on every PR — a
+change that doesn't compile for any of them will fail CI. `build.yml` builds
+the release images. Test on real
 hardware where you can; note in the PR which backend (UART / CAN) you tested.
 
 ## Releases
