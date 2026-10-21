@@ -486,4 +486,42 @@ inline bool csrfOk(bool bearer, const char* origin, const char* referer, const c
   return false;
 }
 
+// ---- Config files kept across OTA updates ---------------------------------
+// A web-interface OTA rewrites the whole SPIFFS partition, which used to wipe
+// the device config with it (UART/CAN pins: the ESP then stopped talking to
+// the inverter). These small files are mirrored into NVS, which OTA leaves
+// alone, and written back at boot if missing. Large UI layouts don't fit
+// NVS; the UI stashes and restores those around an update instead.
+static const size_t CFG_MIRROR_MAX = 3800; // well under one NVS entry/page
+struct CfgMirrorFile { const char* path; const char* nvsKey; };
+static const CfgMirrorFile CFG_MIRRORED[] = {
+  { "/settings.json", "settings" },
+  { "/uiprefs.json", "uiprefs" },
+};
+
+// NVS key for a mirrored file, or nullptr if the path isn't mirrored.
+// Accepts paths with or without the leading '/'.
+inline const char* cfgNvsKey(const char* path)
+{
+  if (!path) return nullptr;
+  for (const CfgMirrorFile& f : CFG_MIRRORED) {
+    if (strcmp(path, f.path) == 0 || strcmp(path, f.path + 1) == 0) return f.nvsKey;
+  }
+  return nullptr;
+}
+
+enum CfgSyncAction { CFG_SYNC_NONE, CFG_SYNC_SAVE_TO_NVS, CFG_SYNC_RESTORE_FILE };
+
+// Boot-time decision for one mirrored file. The file wins when present, so
+// a backup restored through the Files tab (or an older firmware's file)
+// becomes the kept copy; NVS only fills in a file the update erased.
+inline CfgSyncAction cfgSyncAction(bool fileExists, size_t fileLen, bool nvsHas, bool sameAsNvs)
+{
+  if (fileExists) {
+    if (fileLen == 0 || fileLen > CFG_MIRROR_MAX) return CFG_SYNC_NONE;
+    return sameAsNvs ? CFG_SYNC_NONE : CFG_SYNC_SAVE_TO_NVS;
+  }
+  return nvsHas ? CFG_SYNC_RESTORE_FILE : CFG_SYNC_NONE;
+}
+
 } // namespace weblogic

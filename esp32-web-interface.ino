@@ -801,6 +801,88 @@ bool handleFileRead(String path, bool allowSd = true){
   return false;
 }
 
+// ---- Config kept across OTA (see weblogic::CFG_MIRRORED) -----------------
+// settings.json and uiprefs.json are mirrored into NVS namespace "oicfg";
+// an OTA rewrites SPIFFS but not NVS, so boot puts them back.
+static void cfgMirrorSave(const char* path)
+{
+  const char* key = weblogic::cfgNvsKey(path);
+  if (!key) return;
+  String p = weblogic::normalizeFsPath(path);
+  File f = SPIFFS.open(p, "r");
+  if (!f) return;
+  size_t len = f.size();
+  if (len == 0 || len > weblogic::CFG_MIRROR_MAX) { f.close(); return; }
+  uint8_t* buf = (uint8_t*)malloc(len);
+  if (!buf) { f.close(); return; }
+  size_t got = f.read(buf, len);
+  f.close();
+  Preferences prefs;
+  if (got == len && prefs.begin("oicfg", false)) {
+    prefs.putBytes(key, buf, len);
+    prefs.end();
+  }
+  free(buf);
+}
+
+static void cfgMirrorRemove(const char* path)
+{
+  const char* key = weblogic::cfgNvsKey(path);
+  if (!key) return;
+  Preferences prefs;
+  if (prefs.begin("oicfg", false)) { prefs.remove(key); prefs.end(); }
+}
+
+// Boot: restore mirrored files an update erased, and mirror files that are
+// newer than (or missing from) NVS — e.g. settings saved by older firmware
+static void cfgBootSync()
+{
+  Preferences prefs;
+  if (!prefs.begin("oicfg", false)) return;
+  for (const weblogic::CfgMirrorFile& m : weblogic::CFG_MIRRORED) {
+    size_t nvsLen = prefs.isKey(m.nvsKey) ? prefs.getBytesLength(m.nvsKey) : 0;
+    uint8_t* nvsBuf = nvsLen ? (uint8_t*)malloc(nvsLen) : nullptr;
+    if (nvsLen && (!nvsBuf || prefs.getBytes(m.nvsKey, nvsBuf, nvsLen) != nvsLen)) { free(nvsBuf); continue; }
+    bool exists = SPIFFS.exists(m.path);
+    size_t fileLen = 0;
+    bool same = false;
+    if (exists) {
+      File f = SPIFFS.open(m.path, "r");
+      fileLen = f ? f.size() : 0;
+      if (f && nvsBuf && fileLen == nvsLen) {
+        same = true;
+        for (size_t i = 0; i < fileLen && same; i++) same = (f.read() == nvsBuf[i]);
+      }
+      if (f) f.close();
+    }
+    switch (weblogic::cfgSyncAction(exists, fileLen, nvsBuf != nullptr, same)) {
+      case weblogic::CFG_SYNC_RESTORE_FILE: {
+        File f = SPIFFS.open(m.path, "w");
+        if (f) { f.write(nvsBuf, nvsLen); f.close(); }
+        DBG_OUTPUT_PORT.printf("Config: restored %s from NVS\n", m.path);
+        break;
+      }
+      case weblogic::CFG_SYNC_SAVE_TO_NVS:
+        prefs.end();
+        cfgMirrorSave(m.path);
+        prefs.begin("oicfg", false);
+        break;
+      default: break;
+    }
+    free(nvsBuf);
+  }
+  prefs.end();
+}
+
+// "Reset settings": forget the device config (pins, CAN, name, UI prefs) in
+// both places. Users, Wi-Fi and the UI layouts are left alone.
+static void cfgResetAll()
+{
+  Preferences prefs;
+  if (prefs.begin("oicfg", false)) { prefs.clear(); prefs.end(); }
+  for (const weblogic::CfgMirrorFile& m : weblogic::CFG_MIRRORED) SPIFFS.remove(m.path);
+}
+
 void handleFileUpload(){
   if(server.uri() != "/edit") return;
   HTTPUpload& upload = server.upload();
@@ -820,6 +902,7 @@ void handleFileUpload(){
   } else if(upload.status == UPLOAD_FILE_END){
     if(fsUploadFile) {
       fsUploadFile.close();
+      cfgMirrorSave(upload.filename.c_str()); // no-op unless it's a kept config file
       DBG_OUTPUT_PORT.println("Upload complete: " + upload.filename + " (" + String(upload.totalSize) + " bytes)");
     } else {
       DBG_OUTPUT_PORT.println("ERROR: Upload failed - file was not written (SPIFFS open failed)");
@@ -1009,6 +1092,7 @@ void handleFileDelete(){
   if(!SPIFFS.exists(path))
     return server.send(404, "text/plain", "FileNotFound");
   SPIFFS.remove(path);
+  cfgMirrorRemove(path.c_str()); // or the next boot would bring it back
   server.send(200, "text/plain", "");
   path = String();
 }
@@ -2214,6 +2298,7 @@ static void saveSettings(const String& canNodesJson)
              canEnPin, canEnInv ? "true" : "false",
              canNodesJson.c_str());
     f.close();
+    cfgMirrorSave("/settings.json");
   }
 }
 
@@ -2336,6 +2421,14 @@ static void handleSettings()
     if (!apFallback && WiFi.getMode() != WIFI_AP_STA && WiFi.getMode() != WIFI_AP)
       WiFi.mode(WIFI_AP_STA);
     server.send(200, "text/json", "{\"result\":\"ok\"}");
+  } else if (server.hasArg("reset_settings")) {
+    // Deliberate factory reset of the device config: now that it survives
+    // updates, reflashing over Wi-Fi is no longer a way to clear it
+    cfgResetAll();
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/json", "{\"result\":\"ok\",\"rebooting\":true}");
+    delay(250);
+    ESP.restart();
   } else if (server.hasArg("sd_enabled")) {
     sdEnabled = (server.arg("sd_enabled") == "1");
     saveSettings();
@@ -3037,6 +3130,7 @@ void setup(void){
   
   // Initialize SPIFFS early so we can load settings before UART init
   SPIFFS.begin();
+  cfgBootSync(); // put back config an OTA erased, before anything reads it
   loadSettings();
   authLoad(); // users (NVS): decides whether sign-in is required
   canVirtualLoad();

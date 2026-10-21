@@ -1755,6 +1755,76 @@ const exportUiSettings = async () => {
   a.click();
 };
 
+// ==================== Keeping settings across updates ====================
+// A web-interface update rewrites the whole filesystem. The device keeps its
+// own config (settings.json, uiprefs.json) in NVS and puts it back itself;
+// the UI layouts are too big for that, so the browser stashes them just
+// before flashing and uploads any the update erased once it's back.
+const UPDATE_STASH_KEY = 'oi-update-restore';
+const UPDATE_STASH_FILES = ['gauges.json', 'plots.json', 'presets.json', 'favorites.json', 'virtualvals.json', 'paramlog.json'];
+const UPDATE_STASH_MAX_AGE = 24 * 3600 * 1000;
+
+async function stashFilesForUpdate() {
+  const files = {};
+  // Only files that really exist: the firmware serves built-in defaults for
+  // missing layout files, and stashing those would "restore" them later
+  let present;
+  try {
+    const r = await fetch('/list', { cache: 'no-store' });
+    present = r.ok ? new Set((await r.json()).map(f => String(f.name).replace(/^\/+/, ''))) : null;
+  } catch (e) { present = null; }
+  await Promise.all(UPDATE_STASH_FILES.filter(n => !present || present.has(n)).map(async name => {
+    try {
+      const r = await fetch('/' + name, { cache: 'no-store' });
+      if (r.ok) files[name] = await r.text();
+    } catch (e) {}
+  }));
+  try { localStorage.setItem(UPDATE_STASH_KEY, JSON.stringify({ at: Date.now(), files })); } catch (e) { return -1; }
+  return Object.keys(files).length;
+}
+
+// Runs once at load (after sign-in when that's on). Only fills in files the
+// update erased: anything already on the device is newer and left alone.
+async function restoreFilesAfterUpdate() {
+  let stash;
+  try { stash = JSON.parse(localStorage.getItem(UPDATE_STASH_KEY) || 'null'); } catch (e) { stash = null; }
+  if (!stash || !stash.files) return 0;
+  if (!(Date.now() - stash.at < UPDATE_STASH_MAX_AGE)) { try { localStorage.removeItem(UPDATE_STASH_KEY); } catch (e) {} return 0; }
+  if (!can('operator')) return 0; // keep it for someone who can write
+  // What's really on the filesystem comes from /list: the firmware answers
+  // a missing gauges/plots/favourites file with built-in defaults (200), so
+  // fetching the file can't tell "erased" from "saved"
+  let present;
+  try {
+    const r = await fetch('/list', { cache: 'no-store' });
+    if (!r.ok) return 0; // signed out or device unsure: try again next load
+    present = new Set((await r.json()).map(f => String(f.name).replace(/^\/+/, '')));
+  } catch (e) { return 0; }
+  let restored = 0;
+  for (const [name, text] of Object.entries(stash.files)) {
+    if (present.has(name)) continue; // already there (newer): leave it
+    try {
+      const fd = new FormData();
+      fd.append('updatefile', new Blob([text], { type: 'application/json' }), name);
+      const up = await fetch('/edit', { method: 'POST', body: fd });
+      if (!up.ok) return restored;
+      restored++;
+    } catch (e) { return restored; }
+  }
+  try { localStorage.removeItem(UPDATE_STASH_KEY); } catch (e) {}
+  return restored;
+}
+
+const resetDeviceSettings = async () => {
+  if (!confirm('Reset the device settings to their defaults?\n\nUART/CAN pins, CAN node and speed, device name, SD and UI preferences go back to defaults and the device reboots. You may need to set the UART or CAN pins again before it can talk to the inverter.\n\nUser accounts, Wi-Fi and your layouts are kept.')) return;
+  try {
+    const r = await fetch('/settings', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'reset_settings=1' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    alert('Settings reset — the device is rebooting. The page reloads in a few seconds.');
+    setTimeout(() => location.reload(), 7000);
+  } catch (e) { alert('Reset failed: ' + e.message); }
+};
+
 // ==================== Update ====================
 
 const Update = () => {
@@ -1883,9 +1953,11 @@ const Update = () => {
     // refused by the chip check anyway, but only after a full download
     const warn = !name.startsWith(canonTarget(otaTarget) + '_')
       ? '\n\nWARNING: this image is not built for this board (' + otaTarget + ') — the device will refuse to activate it.' : '';
-    if (!confirm('Download and install "' + name + '"?' + warn + '\n\nThis erases saved settings and favourites (the whole filesystem is replaced) — export them first if you want to keep them.\n\nThe device will reboot when done.')) return;
+    if (!confirm('Download and install "' + name + '"?' + warn + '\n\nDevice settings are kept, and your layouts (gauges, plots, presets, favourites) are backed up in this browser and restored after the reboot.\n\nThe device will reboot when done.')) return;
     setGhMsg('');
-    setUpdating(true); setProgress(0); setUpdateMsg('Device is downloading ' + name + ' — do not power off.');
+    setUpdating(true); setProgress(0); setUpdateMsg('Backing up your layouts...');
+    if (await stashFilesForUpdate() < 0 && !confirm('Could not back up your layouts in this browser (storage full or blocked). Continue anyway? Export them first if you want to keep them.')) { setUpdating(false); return; }
+    setUpdateMsg('Device is downloading ' + name + ' — do not power off.');
     dispatch({ type: 'SET_LOGGING', payload: true });
     try {
       const r = await fetch('/espupdate-url', {
@@ -2088,8 +2160,10 @@ const Update = () => {
     }
     const wrongBoard = !file.name.startsWith(canonTarget(otaTarget) + '_');
     const warn = wrongBoard ? '\n\nWARNING: this image is not built for this board (' + otaTarget + ').' : '';
-    if (!confirm('Update the web interface from "' + file.name + '"?' + warn + '\n\nThis erases saved settings and favourites (the whole filesystem is replaced) — export them first if you want to keep them.\n\nThe device will reboot when done.')) return;
-    setUpdating(true); setProgress(0); setUpdateMsg('Uploading OTA image...');
+    if (!confirm('Update the web interface from "' + file.name + '"?' + warn + '\n\nDevice settings are kept, and your layouts (gauges, plots, presets, favourites) are backed up in this browser and restored after the reboot.\n\nThe device will reboot when done.')) return;
+    setUpdating(true); setProgress(0); setUpdateMsg('Backing up your layouts...');
+    if (await stashFilesForUpdate() < 0 && !confirm('Could not back up your layouts in this browser (storage full or blocked). Continue anyway? Export them first if you want to keep them.')) { setUpdating(false); return; }
+    setUpdateMsg('Uploading OTA image...');
     dispatch({ type: 'SET_LOGGING', payload: true }); // pause polling so it doesn't compete with the upload
     try {
       await flashEsp(file);
@@ -2127,7 +2201,7 @@ const Update = () => {
           <p id="update-newer-note" style="color:var(--accent);font-size:.78rem;font-weight:600;margin:0 0 .25rem">▲ Newer release available: ${state.updateTag}</p>
           <div class="flex-break"></div>
         `}
-        <button onclick=${exportUiSettings} title="Updating erases saved settings — back them up first"><${Icon} n="download" />Export settings (backup)</button>
+        <button onclick=${exportUiSettings} title="Download a backup of your layouts and preferences"><${Icon} n="download" />Export settings (backup)</button>
         <div class="flex-break"></div>
         <input type="text" value=${ghUrl} oninput=${e => setGhUrl(e.target.value)}
           placeholder="https://github.com/owner/repo" style="width:100%;margin-bottom:.25rem;font-size:.8rem" />
@@ -2187,7 +2261,7 @@ const Update = () => {
           <p>A daily check flags newer releases with a badge in the sidebar (toggle it off with <b>Daily update check</b>). When one is available its release list loads automatically; otherwise <b>Get releases</b> lists them from the GitHub repo above (pre-filled with the repo this build came from). The image for your board is selected by default — then <b>Download & install</b>, or use <b>Install OTA image from file</b> to flash one you built locally.</p>
           <p><b>Update channel</b>: <b>Stable</b> (default) offers tested releases only. <b>Dev</b> also offers the pre-releases (<code>vX.Y-dev.N</code>) built from every change on the dev branch — newer, less tested; a dev device still moves on to the stable release that follows them.</p>
           <p>Use <b>Upload single file</b> for individual file tweaks.</p>
-          <p><b>Updating erases your saved settings and favourites</b> — the whole filesystem is replaced. Use <b>Export settings (backup)</b> first, then restore them from Settings afterwards. User accounts are kept: they are stored outside the filesystem.</p>
+          <p><b>Your settings survive updates.</b> The device keeps its own settings (pins, CAN, name, UI preferences) and user accounts outside the filesystem. Your layouts — gauges, plots, presets, favourites — are backed up in this browser just before flashing and put back automatically after the reboot. <b>Export settings (backup)</b> is still worth doing before flashing over USB or from another browser.</p>
           <p style="font-size:.8rem;color:var(--text3);margin:0">The bootloader and partition table aren't touched, so a bad image stays recoverable over USB. The web interface reboots and the page reloads when done.</p>
         </div>
       </div>
@@ -3892,6 +3966,15 @@ const Settings = () => {
             </div>
           `)}
           <p style="font-size:.72rem;color:var(--text3);margin:.35rem 0 0">Restoring replaces that file on the device and reloads the page.</p>
+        </div>
+
+        <div class="dash-box compact" id="reset-settings-box">
+          <h3>Reset Settings</h3>
+          <p style="font-size:.8rem;margin:0 0 .5rem">Device settings (UART/CAN pins, CAN node and speed, device name, SD and UI preferences) are kept when you update. Reset them to the defaults here; the device reboots.</p>
+          <${Gate} need="admin">
+          <button id="reset-settings" onclick=${resetDeviceSettings} style="width:auto"><${Icon} n="undo" />Reset device settings</button>
+          </${Gate}>
+          <p style="font-size:.72rem;color:var(--text3);margin:.35rem 0 0">User accounts, Wi-Fi and your gauge pages, plots, presets and favourites are not affected.</p>
         </div>
 
         `}
@@ -5897,6 +5980,17 @@ const App = () => {
   // the effect last ran
   const activeTabRef = useRef(state.activeTab);
   activeTabRef.current = state.activeTab;
+
+  // First load after a web-interface update: put back the layouts the
+  // update erased, then reload once so every tab reads them
+  useEffect(() => {
+    restoreFilesAfterUpdate().then(n => {
+      if (n > 0) {
+        showToast('Restored ' + n + ' layout file' + (n > 1 ? 's' : '') + ' after the update', 'ok');
+        setTimeout(() => location.reload(), 1200);
+      }
+    });
+  }, []);
 
   // URL breadcrumbs: reflect the active tab into the hash (so the current
   // view can be bookmarked) and follow hash changes (back/forward buttons,

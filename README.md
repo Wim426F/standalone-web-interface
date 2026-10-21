@@ -285,9 +285,13 @@ Once a board is running, update it from the **Update** page - no cables or toolc
 - **Install OTA image from file** flashes an `*-ota.bin` you already have.
 - **Upload single file** replaces one file of the web interface.
 
-> **Export your settings first.** An OTA update replaces the whole filesystem, which erases saved
-> favourites, gauge and plot layouts, presets and preferences. **Update → Export settings (backup)**
-> saves them as one file; import it again from **Settings → Configuration**.
+> **Your settings survive updates.** An OTA update replaces the whole filesystem, but the device
+> keeps its settings (UART/CAN pins, CAN node and speed, device name, UI preferences), user
+> accounts and Wi-Fi outside it, and puts them back after the reboot. Your layouts (gauges, plots,
+> presets, favourites, virtual values) are backed up in the browser you update from and restored
+> automatically. Flashing over USB, or updating from a different browser, doesn't do that: use
+> **Update → Export settings (backup)** first and import it again from **Settings → Configuration**.
+> To go back to default settings on purpose, use **Settings → Configuration → Reset device settings**.
 
 The bootloader and partition table are never touched, so a bad image is still
 recoverable over USB. The board reboots and the page reloads when the flash completes.

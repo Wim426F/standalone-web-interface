@@ -120,6 +120,7 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
   let otainfo = { version: 'v0.1-mock', repo: 'https://github.com/wjcloudy/esp32-web-interface', target: 'esp32' };
   let uartPages = 4; // pages reported for the UART-mode fwupdate flow
   let fwSteps = []; // every step passed to /fwupdate, in order
+  let otaFlashes = 0; // web-interface OTA images accepted by /espupdate
   let wifi = { apSSID: 'inverter', staSSID: 'mocknet' }; // what WiFi.softAPSSID()/SSID() report
   let sseMode = 'on';
   let sseRes = null; // the one live stream (firmware: newest stream wins)
@@ -374,7 +375,7 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
 
       // --- test introspection ---
       if (p === '/__test/commands') return json(commandLog);
-      if (p === '/__test/state') return json({ inverter, files: [...files.keys()], settings, canNodes, canMap, commandLog, fwSteps, wifi, sseOpen: sseRes !== null,
+      if (p === '/__test/state') return json({ inverter, files: [...files.keys()], settings, canNodes, canMap, commandLog, fwSteps, otaFlashes, wifi, sseOpen: sseRes !== null,
         users: auth.users().map(u => ({ name: u.name, role: u.role })), sessions: auth.sessionCount(), otaRunning: !auth.enabled() });
       if (p === '/__test/add-user') {
         const err = auth.add(q.get('name'), q.get('password'), q.get('role') || 'viewer');
@@ -384,7 +385,7 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
       if (p === '/__test/auth-reset') { auth.clear(); return text('ok'); }
       if (p === '/__test/reset') {
         auth.clear(); clockOffset = 0;
-        inverter = freshInverterState(); files = new Map(); commandLog = []; fwSteps = [];
+        inverter = freshInverterState(); files = new Map(); commandLog = []; fwSteps = []; otaFlashes = 0;
         settings = freshSettings(); canNodes = null; wifi = { apSSID: 'inverter', staSSID: 'mocknet' }; canMap = []; canCacheLoaded = true; sseMode = 'on';
         fwStatus = { state: 0 };
         return text('reset');
@@ -643,6 +644,13 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
           settings.uart_rx_pin = settings.txrx_swapped ? 1 : 3;
           return ok();
         }
+        if (mayWrite && q.has('reset_settings')) {
+          // cfgResetAll(): device config back to defaults (file + NVS copy),
+          // users/Wi-Fi/layouts untouched; the device then reboots
+          settings = freshSettings(); canNodes = null;
+          files.delete('settings.json'); files.delete('uiprefs.json');
+          return text('{"result":"ok","rebooting":true}', 'text/json');
+        }
         if (mayWrite && q.has('dev_name')) { settings.dev_name = q.get('dev_name').slice(0, 32); return ok(); }
         if (mayWrite && q.has('ap_fallback')) { settings.ap_fallback = q.get('ap_fallback') === '1'; return ok(); }
         if (mayWrite && q.has('can_mode')) {
@@ -721,6 +729,18 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
       if (p === '/can-scan') {
         if (!settings.can_mode) return send(400, '{"error":"CAN mode not enabled"}', 'text/json');
         return text('[{"nodeId":1,"serial":3405691582}]', 'text/json');
+      }
+      if (p === '/espupdate' && req.method === 'POST') {
+        // A combined OTA image rewrites the whole SPIFFS partition. The
+        // firmware keeps settings.json/uiprefs.json in NVS and writes them
+        // back at boot (cfgBootSync), so those survive; everything else the
+        // user saved is gone. (This mock's settings live in memory, so they
+        // survive too, matching the device.)
+        const kept = new Map();
+        for (const name of ['settings.json', 'uiprefs.json']) if (files.has(name)) kept.set(name, files.get(name));
+        files = kept;
+        otaFlashes++;
+        return json({ ok: true });
       }
       if (p === '/reboot') return text('Rebooting...');
       if (p === '/reset-inverter') return text('Inverter reset sent');
