@@ -112,7 +112,6 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
 
   const allValues = () => ({ ...inverter.params, ...inverter.spot });
   const findParamByName = (name) => allValues()[name];
-  const findParamById = (id) => Object.entries(allValues()).find(([, v]) => v.id === id);
 
   // Virtual spot values (CAN mode): ESP-side RX mappings from /virtualvals.json
   function virtualItems() {

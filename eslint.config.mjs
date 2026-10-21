@@ -75,6 +75,8 @@ export default [
         // page.evaluate/addInitScript callbacks execute in the browser
         document: 'readonly', window: 'readonly', localStorage: 'readonly', getComputedStyle: 'readonly',
         navigator: 'readonly', Promise: 'readonly',
+        // Node 18+ web globals used by the mock contract tests
+        FormData: 'readonly', Blob: 'readonly',
       },
     },
     rules: {
