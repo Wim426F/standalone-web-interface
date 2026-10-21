@@ -4,11 +4,16 @@ name: Tests
 # so it runs on fork PRs too: lint + asset sync, the Playwright E2E suite
 # against the mock ESP, and a compile of every PlatformIO environment plus
 # the SPIFFS image. Release images are built by build.yml.
+#
+# Branch flow: work lands on dev (pushes run this directly), dev → main by
+# PR (runs this as the required checks). A push to main runs this again via
+# build.yml's workflow_call, and only a green run there cuts a release.
 on:
   push:
-    branches: [main]
+    branches: [dev]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

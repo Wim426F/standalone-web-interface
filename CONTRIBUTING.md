@@ -74,7 +74,15 @@ change that doesn't compile for any of them will fail CI. `build.yml` builds
 the release images. Test on real
 hardware where you can; note in the PR which backend (UART / CAN) you tested.
 
-## Releases
+## Branches and releases
 
-Tag `vX.Y` on `main` and CI attaches full-flash and OTA images for both
-boards to a GitHub release.
+- **`dev`** is the working branch. Open PRs against it (or push to it);
+  every push and PR runs the full suite (lint, E2E, firmware compile matrix)
+  and builds the images as workflow artifacts.
+- **`main`** is the release branch. Changes reach it by a PR from `dev`, which
+  must pass the required checks. Every push to `main` runs the full suite
+  again and, if it's green, automatically tags the next `vX.Y` (minor + 1),
+  builds full-flash and OTA images for both boards and publishes them as a
+  GitHub release with generated notes (edit the notes afterwards if needed).
+- Put `[skip release]` in the head commit message to land on `main` without
+  releasing. Pushing a `vX.Y` tag by hand still releases that exact tag.

@@ -1,18 +1,40 @@
 name: Build combined images
 
+# dev / PRs: build the images as workflow artifacts (versioned
+# vX.Y-N-gSHA by git describe), no release.
+# Push to main: run the full test suite first, then bump to the next
+# vMAJOR.MINOR tag, build, and publish a GitHub release with the images.
+# Put "[skip release]" in the head commit message to build without releasing.
+# Pushing a v* tag by hand still releases that exact tag.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
 
-# needed so the release step can attach assets
+# needed so the release step can create the tag/release and attach assets
 permissions:
   contents: write
 
+# Releases on main run one at a time, so two quick pushes can't both claim
+# the same version number
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+
 jobs:
+  tests:
+    # dev pushes and PRs already run tests.yml on their own
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/tests.yml
+    permissions:
+      contents: read
+
   build:
+    needs: tests
+    # tests is skipped off main; any failure there blocks the release
+    if: ${{ !cancelled() && (needs.tests.result == 'success' || needs.tests.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -20,10 +42,32 @@ jobs:
           fetch-depth: 0   # full history + tags so git describe versions the build
 
       - name: Resolve version from git
+        env:
+          HEAD_MSG: ${{ github.event.head_commit.message }}
         run: |
-          VER=$(git describe --tags --always)
-          echo "VER=$VER" >> $GITHUB_ENV
-          echo "Version: $VER"
+          RELEASE=false
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF#refs/tags/}"
+            RELEASE=true
+          elif [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main && "$HEAD_MSG" != *"[skip release]"* ]]; then
+            VER=$(git tag --points-at HEAD --list 'v*' --sort=-v:refname | head -n1)
+            if [ -z "$VER" ]; then
+              LAST=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+              [ -n "$LAST" ] || LAST=v0.0
+              MAJOR=$(echo "${LAST#v}" | cut -d. -f1)
+              MINOR=$(echo "${LAST#v}" | cut -d. -f2 | grep -o '^[0-9]*')
+              VER="v${MAJOR}.$((MINOR + 1))"
+              # Local tag only, so version.py's git describe bakes VER into
+              # the firmware/UI; the release step creates it on GitHub
+              git tag "$VER"
+            fi
+            RELEASE=true
+          else
+            VER=$(git describe --tags --always)
+          fi
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          echo "RELEASE=$RELEASE" >> "$GITHUB_ENV"
+          echo "Version: $VER (release: $RELEASE)"
 
       - uses: actions/setup-python@v6
         with:
@@ -132,10 +176,17 @@ jobs:
           path: esp32s3_${{ env.VER }}-0x000.bin
           retention-days: 30
 
-      - name: Attach images to release
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Creates the tag (at this commit) and the release if they don't exist
+      # yet; a GITHUB_TOKEN-created tag doesn't re-trigger this workflow
+      - name: Publish release
+        if: env.RELEASE == 'true'
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ env.VER }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ env.VER }}
+          generate_release_notes: true
+          make_latest: true
           files: |
             esp32_${{ env.VER }}-0x000.bin
             esp32s3_${{ env.VER }}-0x000.bin
