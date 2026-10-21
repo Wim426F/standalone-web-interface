@@ -26,7 +26,7 @@ export default [
     ignores: [
       'data/preact.umd.js', 'data/preact-hooks.umd.js', 'data/htm.umd.js',
       'data/nosleep.js', 'data/docstrings.js',
-      'node_modules/**', '.pio/**', 'playwright-report/**', 'test-results/**',
+      'node_modules/**', '.pio/**', '_site/**', 'playwright-report/**', 'test-results/**',
     ],
   },
   {
@@ -65,7 +65,21 @@ export default [
     rules: { ...js.configs.recommended.rules },
   },
   {
-    files: ['tests/**/*.mjs', 'tests/**/*.js', 'playwright.config.mjs', 'eslint.config.mjs'],
+    // Live demo transport + data: plain browser scripts loaded before app.js
+    files: ['demo/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: { ...browserGlobals, globalThis: 'readonly', Response: 'readonly' },
+    },
+    rules: {
+      ...js.configs.recommended.rules,
+      'no-empty': ['error', { allowEmptyCatch: true }],
+      'no-unused-vars': ['error', { args: 'none', caughtErrors: 'none' }],
+    },
+  },
+  {
+    files: ['tests/**/*.mjs', 'tests/**/*.js', 'demo/*.mjs', 'playwright.config.mjs', 'eslint.config.mjs'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',

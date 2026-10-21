@@ -82,12 +82,50 @@ hardware where you can; note in the PR which backend (UART / CAN) you tested.
 ## Branches and releases
 
 - **`dev`** is the working branch. Open PRs against it (or push to it);
-  every push and PR runs the full suite (lint, E2E, firmware compile matrix)
-  and builds the images as workflow artifacts.
+  every PR runs the full suite (lint, E2E, firmware compile matrix). Every
+  push to `dev` runs the full suite and, if it's green, publishes a **dev
+  pre-release** (see below).
 - **`main`** is the release branch. Changes reach it by a PR from `dev`, which
   must pass the required checks. Every push to `main` runs the full suite
   again and, if it's green, automatically tags the next `vX.Y` (minor + 1),
   builds full-flash and OTA images for both boards and publishes them as a
   GitHub release with generated notes (edit the notes afterwards if needed).
-- Put `[skip release]` in the head commit message to land on `main` without
-  releasing. Pushing a `vX.Y` tag by hand still releases that exact tag.
+- Put `[skip release]` in the head commit message to land on `dev` or `main`
+  without releasing. Pushing a `v*` tag by hand still releases that exact tag
+  (as a pre-release if it has a suffix, e.g. `v4.24-dev.3`).
+
+### Update channels: stable and dev
+
+Both channels are GitHub releases with the same four images; they differ in
+version scheme and flags (`.github/workflows/build.yml`, numbering in
+`scripts/release_version.py`):
+
+| Channel | Published by | Version | GitHub flags |
+|---|---|---|---|
+| Stable | push to `main` | `vX.Y` — minor + 1 of the newest **stable** tag | Latest |
+| Dev | push to `dev` | `vX.Y-dev.N` — a preview of the *next* stable `vX.Y`, N = 1, 2, … | pre-release, never Latest |
+
+So versions order as `v4.23 < v4.24-dev.1 < v4.24-dev.2 < v4.24 < v4.25-dev.1`:
+dev tags never bump the stable number, and once `v4.24` ships the next dev
+push starts `v4.25-dev.1`. A dev push whose commit is already a stable
+release (main merged back into dev) publishes nothing. After each dev
+release, all but the newest 5 dev pre-release **pages** are deleted; their
+tags stay (dev numbering counts them, and any build can still be checked
+out). Stable releases are never pruned. Release builds pass the exact
+version to `version.py` (`WEB_VERSION_OVERRIDE`) instead of relying on
+`git describe`, since one commit can carry both a dev and a stable tag.
+
+In the web UI (Update tab → **Update channel**, stored in the browser and in
+the device's `uiprefs.json` like the daily-check toggle):
+
+- **Stable** (default): the daily check asks GitHub for `/releases/latest`
+  (never a pre-release); **Get releases** hides pre-releases.
+- **Dev**: the check reads the `/releases` list and takes the newest version
+  of *all* of them, so a dev device gets each preview and then the stable
+  release that follows; **Get releases** lists pre-releases too, newest
+  version first.
+
+Only tags shaped `vX.Y`, `vX.Y.Z` or `vX.Y-dev.N` are ever accepted from the
+API. The running version may also be a `git describe` form
+(`v4.24-dev.3-2-gabc1234`), which sorts after its tag and before the next
+release. Version-script tests: `npm run test:scripts`.
