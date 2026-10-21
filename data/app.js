@@ -2387,8 +2387,14 @@ const Logger = () => {
     loggingRef.current = true;
     const maxLines = Math.min(5000, Math.max(50, parseInt(samples) || 500));
     let errs = 0; // consecutive failures — tolerate blips, stop when persistent
+    // Each sample waits on a timer before the next: back-to-back requests
+    // starved the ESP's single-threaded server, and an instant reply (the
+    // demo, a cached proxy) spun the loop on microtasks and froze the page
+    const MIN_PERIOD_MS = 50;
+    const pause = ms => new Promise(r => setTimeout(r, ms));
     (async function loop() {
       while (loggingRef.current) {
+        const started = Date.now();
         try {
           // Chunked: long field lists exceed the inverter's 128-char UART
           // command buffer; garbled/mismatched replies throw instead of
@@ -2408,13 +2414,14 @@ const Logger = () => {
             textRef.current.scrollTop = textRef.current.scrollHeight;
           }
         } catch (e) {
-          if (++errs < 5) continue; // transient blip — keep logging
+          if (++errs < 5) { await pause(200 * errs); continue; } // transient blip — back off, keep logging
           if (loggingRef.current) setLogText(p => p + 'Error: ' + e.message + ' — logging stopped\n');
           // Release the app-wide polling pause, or the whole UI stays stale
           // while the Recording pill misleadingly stays lit
           dispatch({ type: 'SET_LOGGING', payload: false });
           break;
         }
+        await pause(Math.max(0, MIN_PERIOD_MS - (Date.now() - started)));
       }
     })();
     return () => { loggingRef.current = false; dispatch({ type: 'SET_LOGGING', payload: false }); };

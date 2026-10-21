@@ -37,6 +37,22 @@ test('dashboard runs on the simulated inverter, with the demo banner', async ({ 
   expect(escaped).toEqual([]);
 });
 
+test('data logger records without freezing the page', async ({ page }) => {
+  // The demo answers instantly: an unpaced logger loop never yielded and hung the tab
+  const escaped = await openDemo(page, '#logger');
+  await page.locator('button', { hasText: 'Add field to log' }).click();
+  await page.locator('#logger div', { hasText: /^Select\.\.\.$/ }).last().click();
+  await page.locator('#logger .hover-row').first().click();
+  await page.locator('button', { hasText: 'Start logging' }).click();
+  await expect.poll(() => page.locator('#data-logger-text-area').inputValue()
+    .then(v => v.trim().split('\n').length), { timeout: 5000 }).toBeGreaterThan(5);
+  // Still responsive: the page can run script and the button reacts
+  expect(await page.evaluate(() => 1 + 1)).toBe(2);
+  await page.locator('button', { hasText: 'Stop logging' }).click();
+  await expect(page.locator('button', { hasText: 'Start logging' })).toBeVisible();
+  expect(escaped).toEqual([]);
+});
+
 test('main tabs render with data', async ({ page }) => {
   const escaped = await openDemo(page);
   await gotoTab(page, 'Parameters');
