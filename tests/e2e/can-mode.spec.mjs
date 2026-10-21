@@ -19,13 +19,8 @@ test.describe('CAN mode', () => {
     await expect(page.locator('#spotValues tr', { hasText: 'udc' })).toContainText('398.5');
   });
 
-  // APP BUG (data/app.js, SET_PARAMS reducer, the `for (const name in p)`
-  // loop ~line 347): every top-level key of the json reply becomes a spot
-  // value, including the firmware's `"can_cache":true` connection marker
-  // (esp32-web-interface.ino canBuildJsonWithValues). In CAN mode a bogus
-  // "can_cache" row appears in Spot Values and in every value picker
-  // (plot, gauges, logger, CAN mapping). Fix: skip non-object entries.
-  test.fixme('the can_cache marker does not show up as a spot value', async ({ page, mock }) => {
+  // Regression: the json's bare "can_cache":true marker used to become a spot value
+  test('the can_cache marker does not show up as a spot value', async ({ page, mock }) => {
     await openApp(page, mock);
     await gotoTab(page, 'Spot Values');
     await expect(page.locator('#spotValues tr', { hasText: 'udc' })).toContainText('398.5');
@@ -56,7 +51,7 @@ test.describe('CAN mode', () => {
     // The CAN layer's SDO range abort comes back as "Value out of range"
     const dialogs = [];
     page.on('dialog', d => { dialogs.push(d.message()); d.accept(); });
-    await input.blur(); // re-focus to start a new edit (see parameters.spec 'second edit' fixme)
+    await input.blur();
     await input.fill('900');
     await input.press('Enter');
     await expect.poll(() => dialogs.length).toBeGreaterThanOrEqual(1);

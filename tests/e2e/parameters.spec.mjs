@@ -152,13 +152,8 @@ test.describe('Parameters tab', () => {
     // Favourites were persisted to the device
     await expect.poll(async () => (await mock.state()).files).toContain('favorites.json');
   });
-  // APP BUG (data/app.js, parameter table <input>, ~lines 1224-1231): the
-  // edit session starts only in onfocus. Enter commits and calls
-  // setEditing(null) but the input keeps focus, so a second value typed
-  // straight away is ignored by onkeyup/onblur (`editing !== p.name`) and
-  // the controlled input snaps back to the old value — the edit is silently
-  // lost. Fix: start the edit session in oninput too (or blur on commit).
-  test.fixme('a second edit typed without leaving the field is sent too', async ({ page, mock }) => {
+  // Regression: Enter ended the edit session but kept focus, so the next value was dropped
+  test('a second edit typed without leaving the field is sent too', async ({ page, mock }) => {
     await openApp(page, mock);
     await gotoTab(page, 'Parameters');
     const input = page.locator('#params tr', { hasText: 'fweak' }).locator('input[type="number"]');

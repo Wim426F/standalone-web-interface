@@ -273,11 +273,8 @@ test.describe('Settings tab', () => {
     await expect.poll(async () => (await mock.state()).wifi.apSSID).toBe('inverter-2');
   });
 
-  // APP BUG (data/app.js saveWiFi, ~line 3059): the reply status is never
-  // checked. The firmware's handleWifi answers 400 "AP update failed —
-  // password must be 8+ characters" for a 1-7 char passphrase, but the UI
-  // still shows "AP settings saved" while the old credentials stay active.
-  test.fixme('a too-short AP passphrase reports the device rejection', async ({ page, mock }) => {
+  // Regression: saveWiFi ignored the firmware's 400 and claimed success
+  test('a too-short AP passphrase reports the device rejection', async ({ page, mock }) => {
     await openApp(page, mock);
     await gotoTab(page, 'Settings');
     await page.locator('label', { hasText: 'Passphrase:' }).first().locator('input').fill('short');

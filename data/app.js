@@ -347,6 +347,8 @@ function reducer(state, action) {
 
       for (const name in p) {
         const v = p[name];
+        // Bare markers such as CAN mode's "can_cache":true aren't values
+        if (!v || typeof v !== 'object') continue;
         const enums = parseEnums(v.unit);
         if (v.isparam) {
           let display = v.value;
@@ -1223,7 +1225,8 @@ const Parameters = () => {
                       <input type="number" min=${p.minimum} max=${p.maximum} step="0.05"
                         value=${editing === p.name ? editValue : p.value}
                         onfocus=${() => { setEditing(p.name); setEditValue(String(p.value)); }}
-                        oninput=${e => setEditValue(e.target.value)}
+                        oninput=${e => { if (editing !== p.name) setEditing(p.name); // Enter ends the session but keeps focus
+                          setEditValue(e.target.value); }}
                         onblur=${() => { if (editing !== p.name) return;
                           if (editValue !== '' && parseFloat(editValue) !== parseFloat(p.value)) saveParam(p.name, editValue);
                           else setEditing(null); }}
@@ -3065,7 +3068,9 @@ const Settings = () => {
       const params = new URLSearchParams();
       if (type === 'ap') { params.set('apSSID', apSSID); params.set('apPW', apPW); }
       else { params.set('staSSID', staSSID); params.set('staPW', staPW); }
-      await fetch('/wifi?' + params.toString(), { method: 'POST' });
+      const r = await fetch('/wifi?' + params.toString(), { method: 'POST' });
+      // The firmware refuses e.g. a 1-7 char AP passphrase with a 400 + reason
+      if (!r.ok) { setWifiMsg((await r.text()).trim() || 'Save failed (HTTP ' + r.status + ')'); return; }
       setWifiMsg(type === 'ap' ? 'AP settings saved' : 'Station settings saved');
       setTimeout(() => setWifiMsg(''), 3000);
     } catch (e) { setWifiMsg('Save failed'); }
