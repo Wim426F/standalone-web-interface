@@ -1,0 +1,74 @@
+name: CodeQL
+
+# Static security analysis of the firmware (C/C++, traced through a real
+# PlatformIO build), the web UI and test tooling (JavaScript), and the
+# workflows themselves (Actions: script injection, unsafe triggers).
+# Findings land in the repo's Security → Code scanning tab.
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+  schedule:
+    - cron: '23 4 * * 1'   # weekly, so new queries catch old code
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: c-cpp
+            build-mode: manual
+          - language: javascript-typescript
+            build-mode: none
+          - language: actions
+            build-mode: none
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # version.py runs git describe during the build
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+          config: |
+            paths-ignore:
+              - node_modules
+              - data/*.min.js
+              - '**/*.gz'
+
+      - uses: actions/setup-python@v6
+        if: matrix.build-mode == 'manual'
+        with:
+          python-version: '3.12'
+
+      # CodeQL extracts C/C++ by watching the compiler, so this must be a
+      # full (uncached) build of the firmware
+      - name: Build firmware for analysis
+        if: matrix.build-mode == 'manual'
+        run: |
+          pip install "platformio==6.1.19"
+          pio run -e esp32_wemos
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}

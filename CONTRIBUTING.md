@@ -30,6 +30,11 @@ Or individually:
 | `npm run check:gz` | Fails if any `data/*.gz` is stale. If you edit a file in `data/`, regenerate its `.gz` twin with `python gzip_assets.py` (any `pio run` does it too) and commit both. |
 | `npm run test:e2e` | Playwright drives the real UI in headless Chromium against a **mock ESP** (`tests/mock-esp/server.mjs`) that implements the firmware's HTTP API and a simulated inverter speaking the protocol in `PROTOCOL.md`. |
 | `npm run mock` | Runs the mock ESP at http://127.0.0.1:8765 so you can develop the UI with no hardware. |
+| `pio test -e native` | Host unit tests for the firmware's pure logic in `src/web_logic.h` (query parsing, input validation, OTA header, UART reply framing, fuzz loops). Needs a host gcc/g++ — on Windows use WSL or Docker. `-e native_asan` runs them under AddressSanitizer + UBSan (Linux/macOS). |
+
+`npm test` doesn't include the native tests. CI also runs `npm audit --audit-level=high`, and CodeQL over the C/C++ firmware, the JavaScript and the workflows. Dependabot raises alerts only (no automatic PRs).
+
+**Firmware logic that parses untrusted input** (HTTP query strings, uploads, settings files, UART replies) belongs in `src/web_logic.h`, with tests in `test/test_web_logic`. Keep it free of hardware calls and globals so it builds on the host.
 
 ## Writing E2E tests
 

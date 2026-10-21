@@ -48,6 +48,40 @@ jobs:
       - name: data/*.gz in sync with sources
         run: npm run check:gz
 
+      # Tooling only (nothing from node_modules ships to the ESP), but a
+      # compromised dev dependency still runs in CI and on contributors' PCs
+      - name: npm audit (high and above)
+        run: npm audit --audit-level=high
+
+  native:
+    name: Firmware unit tests (host, ASan + UBSan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.platformio
+          key: pio-pkgs-${{ runner.os }}-native-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install "platformio==6.1.19"
+
+      # src/web_logic.h: request parsing, input validation, OTA header and
+      # UART reply framing, plus deterministic fuzz loops. The sanitizer
+      # build turns any out-of-bounds access or UB into a failure.
+      - name: Unit tests
+        run: pio test -e native
+
+      - name: Unit tests under sanitizers
+        run: pio test -e native_asan
+
   e2e:
     name: E2E (Playwright vs mock ESP)
     runs-on: ubuntu-latest

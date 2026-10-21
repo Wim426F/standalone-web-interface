@@ -53,6 +53,10 @@
 #include "driver/uart.h"
 #include "src/can_driver.h"
 #include "src/can_protocol.h"
+#include "src/web_logic.h"
+
+using weblogic::jsonEscape;
+using weblogic::findArrayEnd;
 
 #ifndef DBG_OUTPUT_PORT
 #define DBG_OUTPUT_PORT Serial2
@@ -685,7 +689,6 @@ void handleFileUpload(){
 // of sync. Format: "OIWEBOTA" + uint32 LE firmware length + uint32 LE
 // filesystem length, then firmware.bin, then spiffs.bin. The bootloader and
 // partition table are never touched, so a bad image stays recoverable over USB.
-static const char ESP_OTA_MAGIC[8] = {'O','I','W','E','B','O','T','A'};
 static bool espOtaDone = false;   // upload finished (whether or not it worked)
 static bool espOtaOk = false;     // both partitions flashed successfully
 static String espOtaErr;
@@ -720,10 +723,9 @@ static void espOtaFeed(const uint8_t* data, size_t len){
     if(espOtaPhase == 0){
       while(espOtaHdrGot < 16 && i < len) espOtaHdr[espOtaHdrGot++] = data[i++];
       if(espOtaHdrGot < 16) return;
-      if(memcmp(espOtaHdr, ESP_OTA_MAGIC, 8) != 0){ espOtaFail("Not a combined OTA image"); return; }
-      espOtaFwLen = espOtaHdr[8] | (espOtaHdr[9] << 8) | (espOtaHdr[10] << 16) | ((uint32_t)espOtaHdr[11] << 24);
-      espOtaFsLen = espOtaHdr[12] | (espOtaHdr[13] << 8) | (espOtaHdr[14] << 16) | ((uint32_t)espOtaHdr[15] << 24);
-      if(espOtaFwLen == 0 || espOtaFsLen == 0){ espOtaFail("Bad OTA header"); return; }
+      weblogic::OtaHeaderResult hr = weblogic::parseOtaHeader(espOtaHdr, espOtaFwLen, espOtaFsLen);
+      if(hr == weblogic::OTA_HDR_BAD_MAGIC){ espOtaFail("Not a combined OTA image"); return; }
+      if(hr != weblogic::OTA_HDR_OK){ espOtaFail("Bad OTA header"); return; }
       if(!Update.begin(espOtaFwLen, U_FLASH)){ espOtaFail(Update.errorString()); return; }
       espOtaPhase = 1;
     } else if(espOtaPhase == 1){
@@ -853,7 +855,7 @@ void handleFileDelete(){
   //DBG_OUTPUT_PORT.println("handleFileDelete: " + path);
   // The UI sends bare names (/edit?f=subscription.js) but SPIFFS paths are
   // rooted — without this every delete 404'd
-  if(!path.startsWith("/")) path = "/" + path;
+  path = weblogic::normalizeFsPath(path);
   if(path == "/")
     return server.send(500, "text/plain", "BAD PATH");
   if(!SPIFFS.exists(path))
@@ -868,7 +870,7 @@ void handleFileCreate(){
     return server.send(500, "text/plain", "BAD ARGS");
   String path = server.arg(0);
   //DBG_OUTPUT_PORT.println("handleFileCreate: " + path);
-  if(!path.startsWith("/")) path = "/" + path; // same as handleFileDelete
+  path = weblogic::normalizeFsPath(path); // same as handleFileDelete
   if(path == "/")
     return server.send(500, "text/plain", "BAD PATH");
   if(SPIFFS.exists(path))
@@ -1026,6 +1028,18 @@ static int uartReadChunk(char* buf, size_t size, TickType_t firstByteTimeout)
   return m > 0 ? n + m : n;
 }
 
+// The inverter UART as weblogic::readReply sees it
+struct InverterUartPort {
+  int readChunk(char* buf, size_t size, TickType_t firstByteTimeout) {
+    return uartReadChunk(buf, size, firstByteTimeout);
+  }
+  void triggerRepeat() {
+    char echo;
+    uart_write_bytes(INVERTER_PORT, "!", 1); //trigger next repetition
+    uart_read_bytes(INVERTER_PORT, &echo, 1, UART_TIMEOUT); //consume "!"
+  }
+};
+
 // Terminate any partial line sitting in the inverter's terminal buffer
 // (garbage accumulates there whenever we talked at the wrong baud) and
 // discard the inverter's response to it, so the next command's echo/reply
@@ -1123,8 +1137,6 @@ static void handleCommand() {
   String cmd = server.arg("cmd").substring(0, cmdBufSize);
 
   int repeat = 0;
-  char buffer[255];
-  int len = 0; // uart_read_bytes returns -1 on error: as size_t that became SIZE_MAX and passed `len > 0`
   String output;
 
   if (server.hasArg("repeat"))
@@ -1132,8 +1144,7 @@ static void handleCommand() {
     repeat = server.arg("repeat").toInt();
     // Unclamped values could block the single-threaded server for minutes
     // and grow `output` until the heap dies
-    if (repeat < 0) repeat = 0;
-    if (repeat > 100) repeat = 100;
+    repeat = weblogic::clampRepeat(repeat);
   }
 
   if (!fastUart && fastUartAvailable && fastUartAttempts < 3)
@@ -1194,25 +1205,11 @@ static void handleCommand() {
     }
   }
 
+  InverterUartPort port;
   sendCommand(cmd);
-  int rpt = repeat;
   // Full timeout only while waiting for a reply (or repetition) to start;
   // once it's flowing, a short silence means it's done
-  TickType_t wait = UART_TIMEOUT;
-  do {
-    memset(buffer,0,sizeof(buffer));
-    len = uartReadChunk(buffer, sizeof(buffer), wait);
-    if(len > 0) output.concat(buffer, len);
-    wait = UART_IDLE_TIMEOUT;
-
-    if (rpt)
-    {
-      rpt--;
-      uart_write_bytes(INVERTER_PORT, "!", 1); //trigger next repetition
-      uart_read_bytes(INVERTER_PORT, buffer, 1, UART_TIMEOUT); //consume "!"
-      wait = UART_TIMEOUT;
-    }
-  } while (len > 0);
+  output = weblogic::readReply(port, repeat, UART_TIMEOUT, UART_IDLE_TIMEOUT);
 
   if (fastUart && output.length() == 0)
   {
@@ -1224,21 +1221,7 @@ static void handleCommand() {
     fastUartAvailable = false; // re-armed below only once slow comms answer
     uartResync();
     sendCommand(cmd);
-    rpt = repeat;
-    wait = UART_TIMEOUT;
-    do {
-      memset(buffer,0,sizeof(buffer));
-      len = uartReadChunk(buffer, sizeof(buffer), wait);
-      if(len > 0) output.concat(buffer, len);
-      wait = UART_IDLE_TIMEOUT;
-      if (rpt)
-      {
-        rpt--;
-        uart_write_bytes(INVERTER_PORT, "!", 1);
-        uart_read_bytes(INVERTER_PORT, buffer, 1, UART_TIMEOUT);
-        wait = UART_TIMEOUT;
-      }
-    } while (len > 0);
+    output = weblogic::readReply(port, repeat, UART_TIMEOUT, UART_IDLE_TIMEOUT);
   }
 
   // Proof of life at slow baud re-arms fast negotiation (bounded by the
@@ -2034,21 +2017,6 @@ static void handleBaud()
 // must point at '['), skipping over quoted strings (with escapes) — a node
 // named "Leaf [pack 1]" must not terminate the array early and corrupt
 // settings.json on the next save.
-static int findArrayEnd(const String& json, int open)
-{
-  bool inStr = false;
-  int depth = 0;
-  for (unsigned int i = open; i < json.length(); i++) {
-    char c = json[i];
-    if (inStr) {
-      if (c == '\\') i++;          // skip escaped char
-      else if (c == '"') inStr = false;
-    } else if (c == '"') inStr = true;
-    else if (c == '[') depth++;
-    else if (c == ']' && --depth == 0) return i;
-  }
-  return -1;
-}
 
 // Read the saved can_nodes array out of settings.json (returns "[]" if absent)
 static String readSavedCanNodes()
@@ -2069,7 +2037,6 @@ static String readSavedCanNodes()
   return nodes;
 }
 
-static String jsonEscape(const String& s); // defined with the wifi-status handler below
 
 static void saveSettings(const String& canNodesJson)
 {
@@ -2167,6 +2134,14 @@ static void loadSettings()
       if (canNodeId < CAN_NODE_ID_MIN) canNodeId = CAN_NODE_ID_MIN;
       if (canNodeId > CAN_NODE_ID_MAX) canNodeId = CAN_NODE_ID_MAX;
       if (canSpeed < 0 || canSpeed > 2) canSpeed = 2;
+      // Same GPIO checks as handleSettings: a corrupt or hand-edited file
+      // must not configure a nonexistent pin at every boot
+      uartRxPin = weblogic::sanitizePin(uartRxPin, INVERTER_RX);
+      uartTxPin = weblogic::sanitizePin(uartTxPin, INVERTER_TX);
+      canRxPin = weblogic::sanitizePin(canRxPin, CAN_RX_PIN);
+      canTxPin = weblogic::sanitizePin(canTxPin, CAN_TX_PIN);
+      canPwrPin = weblogic::sanitizePin(canPwrPin, -1, true);
+      canEnPin  = weblogic::sanitizePin(canEnPin, -1, true);
     }
   }
 }
@@ -2211,8 +2186,8 @@ static void handleSettings()
     // UART pins ride along on the interface save so a single Save applies them
     if (server.hasArg("uart_rx_pin")) uartRxPin = server.arg("uart_rx_pin").toInt();
     if (server.hasArg("uart_tx_pin")) uartTxPin = server.arg("uart_tx_pin").toInt();
-    if (uartRxPin < 0 || uartRxPin > 48) uartRxPin = INVERTER_RX;
-    if (uartTxPin < 0 || uartTxPin > 48) uartTxPin = INVERTER_TX;
+    uartRxPin = weblogic::sanitizePin(uartRxPin, INVERTER_RX);
+    uartTxPin = weblogic::sanitizePin(uartTxPin, INVERTER_TX);
     // Optional transceiver enable pins: blank/absent → -1 (unused)
     if (server.hasArg("can_pwr_pin")) { String v = server.arg("can_pwr_pin"); canPwrPin = v.length() ? v.toInt() : -1; }
     if (server.hasArg("can_pwr_inv")) canPwrInv = (server.arg("can_pwr_inv") == "1");
@@ -2220,10 +2195,10 @@ static void handleSettings()
     if (server.hasArg("can_en_inv"))  canEnInv  = (server.arg("can_en_inv") == "1");
     // Validate GPIO numbers — garbage would persist and silently kill CAN
     // mode at every boot until the settings file is fixed
-    if (canRxPin < 0 || canRxPin > 48) canRxPin = CAN_RX_PIN;
-    if (canTxPin < 0 || canTxPin > 48) canTxPin = CAN_TX_PIN;
-    if (canPwrPin < -1 || canPwrPin > 48) canPwrPin = -1;
-    if (canEnPin  < -1 || canEnPin  > 48) canEnPin  = -1;
+    canRxPin = weblogic::sanitizePin(canRxPin, CAN_RX_PIN);
+    canTxPin = weblogic::sanitizePin(canTxPin, CAN_TX_PIN);
+    canPwrPin = weblogic::sanitizePin(canPwrPin, -1, true);
+    canEnPin  = weblogic::sanitizePin(canEnPin, -1, true);
     if (canNodeId < CAN_NODE_ID_MIN) canNodeId = CAN_NODE_ID_MIN;
     if (canNodeId > CAN_NODE_ID_MAX) canNodeId = CAN_NODE_ID_MAX;
     if (canSpeed < 0 || canSpeed > 2) canSpeed = 2;
@@ -2332,17 +2307,6 @@ static void wifiModeTick()
 // Live WiFi state for the settings page: station link, signal strength, AP
 // state. SSIDs are attacker-ish input (any nearby network name) — escape
 // them before embedding in JSON.
-static String jsonEscape(const String& s)
-{
-  String out;
-  out.reserve(s.length() + 4);
-  for (size_t i = 0; i < s.length(); i++) {
-    char c = s[i];
-    if (c == '"' || c == '\\') { out += '\\'; out += c; }
-    else if ((uint8_t)c >= 0x20) out += c;
-  }
-  return out;
-}
 
 static void handleWifiStatus()
 {
@@ -2380,17 +2344,6 @@ static uint32_t sseIntervalMs = 100;
 static uint32_t sseLastSend = 0;
 
 // Value of `key` in the request line's query string ("" if absent)
-static String sseQueryParam(const String& reqLine, const char* key)
-{
-  String pat = String(key) + "=";
-  int i = reqLine.indexOf('?');
-  i = (i < 0) ? -1 : reqLine.indexOf(pat, i);
-  if (i < 0) return "";
-  i += pat.length();
-  int e = i;
-  while (e < (int)reqLine.length() && reqLine[e] != '&' && reqLine[e] != ' ') e++;
-  return reqLine.substring(i, e);
-}
 
 static void sseAccept()
 {
@@ -2404,22 +2357,15 @@ static void sseAccept()
     String line = nc.readStringUntil('\n');
     if (line.length() <= 1) break; // bare "\r" = end of headers
   }
-  String names = sseQueryParam(reqLine, "names");
+  String names = weblogic::queryParam(reqLine, "names");
   // Spot value names only — anything else in the query is refused, so the
   // stream can't be used to run arbitrary terminal commands
-  bool namesOk = names.length() > 0 && names.length() <= 120;
-  for (unsigned int i = 0; namesOk && i < names.length(); i++) {
-    char ch = names[i];
-    if (!isalnum(ch) && ch != '_' && ch != ',' && ch != '.' && ch != '-') namesOk = false;
-  }
-  if (reqLine.indexOf("GET /stream") != 0 || !namesOk) {
+  if (reqLine.indexOf("GET /stream") != 0 || !weblogic::sseNamesValid(names)) {
     nc.print("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
     nc.stop();
     return;
   }
-  int ms = sseQueryParam(reqLine, "ms").toInt();
-  if (ms < 50) ms = 100;
-  if (ms > 5000) ms = 5000;
+  int ms = weblogic::sseIntervalMs(weblogic::queryParam(reqLine, "ms").toInt());
   if (sseClient && sseClient.connected()) sseClient.stop(); // newest stream wins
   sseNames = names;
   sseIntervalMs = ms;
@@ -2452,16 +2398,8 @@ static void sseTick()
   // server sequentially, so it never races a /cmd request. Baud negotiation
   // stays handleCommand's job; the regular json poll keeps it settled.
   sendCommand("get " + sseNames);
-  char buffer[255];
-  int len;
-  String out;
-  TickType_t wait = UART_TIMEOUT;
-  do {
-    memset(buffer, 0, sizeof(buffer));
-    len = uartReadChunk(buffer, sizeof(buffer), wait);
-    if (len > 0) out.concat(buffer, len);
-    wait = UART_IDLE_TIMEOUT;
-  } while (len > 0);
+  InverterUartPort port;
+  String out = weblogic::readReply(port, 0, UART_TIMEOUT, UART_IDLE_TIMEOUT);
   if (out.length() == 0) return; // silent inverter — skip the frame, keep the stream
   out.replace('\r', ' ');
   out.replace('\n', ' ');
