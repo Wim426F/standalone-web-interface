@@ -155,6 +155,9 @@ access point, device name (also the hostname), dark/light/system theme and accen
 colour, keep-screen-awake, and export/import of every layout and preference as
 one JSON file.
 
+**Users & access** - optional sign-in with viewer (read-only), operator and admin
+accounts, enforced by the module itself ([details](#users-and-access)).
+
 </td>
 </tr>
 </table>
@@ -226,6 +229,50 @@ Both transports feed the same pages. Gauges stream their values over a
 server-sent-events channel from the board on either transport, falling back to
 polling ([protocol](PROTOCOL.md)).
 
+## Users and access
+
+Out of the box there are no accounts and no sign-in: anyone who can reach the module can see and
+change everything, exactly as before. To share a car or a test bench safely, open
+**Settings → Users & Access** and create an admin account. From then on every page and every
+request needs a signed-in user, and you can add up to eight accounts with one of three roles:
+
+| Role | Can |
+|---|---|
+| **Viewer** | Read only: dashboard, spot values, parameters, plots, gauges, logger, file list. |
+| **Operator** | Viewer + change and save parameters, start/stop, reset the inverter, presets, CAN mapping and CAN messages, layout and data files. |
+| **Admin** | Operator + user management, Wi-Fi and device settings, firmware updates (inverter and this module), ESP32 reboot, replacing the web interface's own files. |
+
+The module enforces this itself; the interface only greys out what your role can't use. A viewer
+can still type read-only terminal commands (`get`, `json`, `errors`, `stream`, `can list`), but every
+other command is refused. Scripts sign in with
+`curl -H 'X-OI-Auth: 1' -d user=NAME -d password=PASS -d token=1 -D - http://inverter.local/auth/login`
+and send the `X-OI-Token` reply header back as `Authorization: Bearer <token>`. (Requests that use
+the session cookie instead must carry `X-OI-Auth: 1` when they change something - the browser
+interface does, a page on another site can't.)
+
+- **Sessions** last 12 hours of inactivity ("keep me signed in": 30 days), never more than 30
+  days, and end on sign-out, on a reboot, and when an admin changes that user's role or password
+  or removes them. Sign-in attempts are rate-limited.
+- **Passwords** are stored only as PBKDF2-SHA256 hashes with a per-user salt, in the module's NVS
+  flash - not in the filesystem, so they are never served, listed, exported or erased by an OTA update.
+- **While sign-in is on**, the network-flashing port (ArduinoOTA, `espota`) is switched off; update
+  through the **Update** page as an admin instead.
+- **Plain HTTP**: the module has no TLS, so passwords and session cookies cross the network
+  unencrypted. Use sign-in on a network you trust (the module's own access point with a strong
+  passphrase, or your own Wi-Fi), not on a public one.
+
+### Locked out?
+
+Recovery needs the hardware in your hands - it is deliberately not possible over the network:
+
+1. **BOOT button**: hold the board's BOOT button for 10 seconds while it is running. All users
+   are deleted, sign-in turns off and the module restarts; settings, layouts and Wi-Fi are kept.
+   (Skipped if that pin is wired to the UART/CAN link; builds can move or disable it with
+   `-D AUTH_RESET_PIN=<gpio>` / `-1`.)
+2. **Serial**: on the debug serial port (115200 baud; USB on the T-2Can), type `auth reset` and Enter.
+3. **USB reflash**: erasing the flash and flashing the `*-0x000.bin` image as in
+   [Over USB](#over-usb) also removes every account.
+
 ## Flashing and updating
 
 ### Over Wi-Fi (OTA)
@@ -246,7 +293,8 @@ The bootloader and partition table are never touched, so a bad image is still
 recoverable over USB. The board reboots and the page reloads when the flash completes.
 
 For development, PlatformIO can flash over the network too (`upload_protocol = espota`
-in `platformio-local-override.ini`):
+in `platformio-local-override.ini`; only while no users are set up - see
+[Users and access](#users-and-access)):
 
 ```sh
 pio run -e esp32_wemos -t upload     # firmware (esp32_t2can for the ESP32-S3)
