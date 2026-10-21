@@ -258,6 +258,16 @@
       case '/espupdate-status': return reply({ state: 0 });
       case '/reboot': notice('nothing was rebooted'); return reply('Demo: nothing to reboot');
       case '/reset-inverter': notice('nothing was reset'); return reply('Demo: nothing to reset');
+      // Users & sign-in: the demo runs with sign-in off (no users), like a
+      // fresh device; Settings → Users & Access shows the setup card, but no
+      // account is ever created
+      case '/auth/state': return reply({ enabled: false, user: null, role: 'admin', password_min: 8 });
+      case '/auth/users':
+        if (method === 'POST') { notice('no account was created'); return reply({ error: DEMO_NO + ' (no account is created)' }, 400); }
+        return reply({ enabled: false, me: null, max: 8, users: [] });
+      case '/auth/stream-ticket': return reply({ ticket: '' });
+      case '/auth/login': case '/auth/logout': case '/auth/password':
+        return reply({ error: DEMO_NO + ' (sign-in is off in the demo)' }, 400);
     }
     if (p === '/gauges.json') await gaugesReady;
     const name = p.replace(/^\/+/, '');

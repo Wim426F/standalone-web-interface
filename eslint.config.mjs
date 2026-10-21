@@ -8,7 +8,7 @@ import js from '@eslint/js';
 const browserGlobals = {
   window: 'readonly', document: 'readonly', navigator: 'readonly',
   location: 'readonly', history: 'readonly', localStorage: 'readonly',
-  fetch: 'readonly', FormData: 'readonly', Blob: 'readonly', File: 'readonly',
+  fetch: 'readonly', Headers: 'readonly', FormData: 'readonly', Blob: 'readonly', File: 'readonly',
   URL: 'readonly', URLSearchParams: 'readonly', AbortController: 'readonly',
   XMLHttpRequest: 'readonly', WebSocket: 'readonly', EventSource: 'readonly',
   setTimeout: 'readonly', clearTimeout: 'readonly',

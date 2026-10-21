@@ -525,7 +525,7 @@ body.kiosk #communication-error-bar { display: none !important; }
 .seg button.sel { background: var(--accent-glow); color: var(--accent); font-weight: 700; }
 
 /* ===== FORMS ===== */
-input[type=number], input[type=text], select, textarea {
+input[type=number], input[type=text], input[type=password], select, textarea {
   padding: 8px 11px; font-size: .9rem; font-family: var(--font);
   background: var(--surface); color: var(--text);
   border: 1px solid var(--border2); border-radius: var(--radius-xs);
@@ -877,3 +877,121 @@ td { font-variant-numeric: tabular-nums; }
 /* pills are tabs, not action buttons — no lift on hover/active/select
    (the generic button transform was nudging the selected pill up a pixel) */
 .page-pill:hover, .page-pill:active { transform: none; }
+
+/* ===== USERS & SIGN-IN ===== */
+/* Permission gate: transparent to layout; dims and disables what the
+   signed-in role can't use (the device refuses it anyway) */
+.perm-gate { display: contents; }
+.perm-gate[inert] > *, .perm-gate[inert] label, .perm-gate[inert] button { opacity: .45; cursor: not-allowed; }
+.perm-gate[inert] .perm-gate[inert] > * { opacity: 1; } /* don't dim twice */
+.settings-grid[inert] > * { opacity: .55; }
+.perm-note {
+  margin: 0 0 .75rem; padding: 8px 12px; border-radius: var(--radius-xs);
+  font-size: .8rem; line-height: 1.45; color: var(--tone-warn); background: var(--tone-warn-bg);
+}
+/* Read-only indicator: a small pill pinned to the bottom of the content
+   area (the tab container is a flex row, so it can't sit in the flow) */
+.readonly-bar {
+  position: fixed; z-index: 150; left: calc(var(--navbar-w) + 10px); bottom: max(10px, env(safe-area-inset-bottom));
+  max-width: calc(100vw - var(--navbar-w) - 20px); box-sizing: border-box;
+  padding: 5px 12px; border-radius: 999px; font-size: .74rem; line-height: 1.35; pointer-events: none;
+  color: var(--tone-warn); background: var(--glass); border: 1px solid var(--tone-warn);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); box-shadow: var(--shadow-sm);
+}
+.readonly-bar .ro-long { margin-left: 4px; }
+body.kiosk .readonly-bar { left: 10px; }
+.role-viewer .whoami .user-avatar { box-shadow: 0 0 0 2px var(--tone-warn); }
+.auth-loading { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+
+.user-avatar {
+  flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: .7rem; font-weight: 700; letter-spacing: .02em;
+  color: var(--accent); background: var(--accent-glow);
+}
+.user-avatar.lg { width: 44px; height: 44px; font-size: .9rem; }
+.role-pill {
+  display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: .65rem; font-weight: 700;
+  letter-spacing: .03em; color: var(--text2); background: var(--surface3); white-space: nowrap;
+}
+.role-pill.role-viewer { color: var(--tone-warn); background: var(--tone-warn-bg); }
+
+/* Sidebar: who is signed in, and sign-out */
+.whoami {
+  display: flex; align-items: center; gap: 8px; margin: 8px 10px 0; padding: 6px 8px;
+  border-radius: var(--radius-xs); background: var(--surface2); cursor: pointer; min-width: 0;
+}
+.whoami:hover { background: var(--surface3); }
+.whoami-text { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
+.whoami-name { font-size: .78rem; font-weight: 600; color: var(--text); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#navbar .signout { margin: 6px 10px 12px; width: auto; justify-content: center; font-size: .72rem; padding: 5px 8px; }
+
+/* Forms on the sign-in screen and in Settings → Users & Access */
+.auth-form { display: flex; flex-direction: column; gap: 10px; max-width: 360px; }
+.auth-field { display: flex; flex-direction: column; gap: 4px; font-size: .8rem; font-weight: 600; color: var(--text2); }
+.auth-field input, .auth-field select { width: 100%; font-size: 16px; padding: 10px 12px; min-height: 44px; box-sizing: border-box; }
+.auth-form button, .login-btn { min-height: 44px; justify-content: center; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button.primary:hover { background: var(--accent2); color: #fff; }
+button.danger { color: var(--red); }
+.auth-lead { font-size: .8rem; color: var(--text2); margin: 0 0 .5rem; line-height: 1.5; }
+.auth-hint { font-size: .72rem; color: var(--text3); margin: .75rem 0 0; line-height: 1.5; max-width: 420px; }
+.auth-err { margin: 0; font-size: .8rem; font-weight: 600; color: var(--red); }
+.auth-ok { margin: 0; font-size: .8rem; font-weight: 600; color: var(--green); }
+.role-guide { margin: .25rem 0 .75rem; padding-left: 1.1rem; font-size: .76rem; color: var(--text2); line-height: 1.6; }
+
+.me-row { display: flex; align-items: center; gap: 12px; margin-bottom: .5rem; flex-wrap: wrap; }
+.me-name { font-weight: 700; font-size: 1rem; margin-bottom: 2px; overflow-wrap: anywhere; }
+.user-rows { list-style: none; margin: 0 0 .5rem; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.user-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 10px; border-radius: var(--radius-xs); background: var(--surface2);
+}
+.user-name { flex: 1 1 120px; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.user-name .you { font-weight: 400; color: var(--text3); font-size: .75rem; }
+.user-row select { width: auto; min-height: 40px; font-size: 16px; }
+.user-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.user-actions button { width: auto; min-height: 40px; font-size: .75rem; padding: 6px 10px; }
+
+/* Sign-in screen */
+.login-wrap {
+  min-height: 100vh; min-height: 100dvh; display: flex; align-items: center; justify-content: center;
+  padding: 16px; box-sizing: border-box;
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+}
+.login-card {
+  width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 12px;
+  padding: 28px 22px; border-radius: var(--radius); background: var(--card);
+  border: 1px solid var(--border); box-shadow: var(--shadow); box-sizing: border-box;
+}
+.login-card h1 { margin: 0; font-size: 1.4rem; text-align: center; }
+.login-logo { width: 48px; height: 48px; margin: 0 auto; color: var(--text3); }
+.login-sub { margin: -6px 0 4px; text-align: center; font-size: .82rem; color: var(--text3); }
+.login-note { margin: 0; padding: 8px 10px; border-radius: var(--radius-xs); font-size: .8rem; color: var(--tone-info); background: var(--tone-info-bg); }
+.login-remember { display: flex; align-items: center; gap: 10px; font-size: .85rem; color: var(--text2); min-height: 44px; }
+.login-remember input { width: 20px; height: 20px; margin: 0; flex-shrink: 0; }
+.login-btn { width: 100%; font-size: 1rem; }
+.login-card .auth-hint { margin: 4px 0 0; text-align: center; }
+
+/* Toasts: bottom centre, clear of the phone's home indicator */
+#oi-toasts {
+  position: fixed; left: 50%; transform: translateX(-50%); z-index: 1000;
+  bottom: max(16px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px;
+  width: min(92vw, 420px); pointer-events: none;
+}
+.oi-toast {
+  padding: 10px 14px; border-radius: var(--radius-xs); font-size: .85rem; line-height: 1.4;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border2); box-shadow: var(--shadow);
+  transition: opacity .3s, transform .3s;
+}
+.oi-toast.bad { border-color: var(--red); }
+.oi-toast.ok { border-color: var(--green); }
+.oi-toast.out { opacity: 0; transform: translateY(6px); }
+
+@media (max-width: 900px) {
+  /* slim rail: the avatar alone opens the account; sign-out shrinks to an icon */
+  .whoami { justify-content: center; margin: 6px 4px 0; padding: 4px; background: none; }
+  .whoami-text { display: none; }
+  #navbar .signout { margin: 4px 4px 10px; padding: 6px 4px; }
+  .readonly-bar .ro-long { display: none; }
+}

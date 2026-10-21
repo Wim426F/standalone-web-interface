@@ -5,6 +5,130 @@ const { h, render, createContext } = preact;
 const { useState, useEffect, useLayoutEffect, useReducer, useContext, useRef, useMemo } = preactHooks;
 const html = htm.bind(h);
 
+// ==================== Users & sign-in ====================
+// Opt-in on the device: with no users there, sign-in is off and AUTH says
+// everyone is an admin (exactly the old behaviour). The device enforces
+// every permission; this side only keeps the UI honest — controls a role
+// can't use are disabled, and refusals are explained (401 -> sign in again,
+// 403 -> a toast).
+const AUTH = { enabled: false, user: null, role: 'admin', remember: false, passwordMin: 8 };
+const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
+const ROLE_LABEL = { viewer: 'Viewer', operator: 'Operator', admin: 'Admin' };
+const ROLE_HELP = {
+  viewer: 'Read-only: values, parameters, plots, gauges and logs',
+  operator: 'Viewer + change parameters, save, start/stop, CAN mapping, data files',
+  admin: 'Operator + users, WiFi and device settings, firmware updates',
+};
+const can = (need) => !AUTH.enabled || (ROLE_RANK[AUTH.role] || 0) >= (ROLE_RANK[need] || 99);
+
+// Small transient messages (bottom of the screen; above the phone's home bar)
+function showToast(msg, kind) {
+  let box = document.getElementById('oi-toasts');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'oi-toasts';
+    box.setAttribute('role', 'status');
+    box.setAttribute('aria-live', 'polite');
+    document.body.appendChild(box);
+  }
+  const t = document.createElement('div');
+  t.className = 'oi-toast' + (kind ? ' ' + kind : '');
+  t.textContent = msg;
+  box.appendChild(t);
+  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 300); }, 3800);
+}
+
+// Same-origin calls carry X-OI-Auth: a page on another site can't set it
+// (and the cookie is SameSite=Strict too), which is how the device tells the
+// UI's own requests from cross-site ones. Cross-origin calls (GitHub, the
+// parameter database) go out untouched.
+const _rawFetch = window.fetch.bind(window);
+let _lastForbidToast = 0;
+function authResponseSeen(path, status, needRole) {
+  if (!AUTH.enabled || /\/auth\/[a-z-]+$/.test(path)) return;
+  if (status === 401) authLapsed();
+  else if (status === 403 && Date.now() - _lastForbidToast > 3000) {
+    _lastForbidToast = Date.now();
+    showToast(needRole ? 'Your ' + (ROLE_LABEL[AUTH.role] || '') + ' account can\'t do that — it needs ' + (ROLE_LABEL[needRole] || needRole) + ' access.'
+      : 'Not allowed for your account.', 'bad');
+  }
+}
+window.fetch = async (input, init) => {
+  let u;
+  try { u = new URL(typeof input === 'string' ? input : input.url, location.href); } catch (e) { return _rawFetch(input, init); }
+  if (u.origin !== location.origin) return _rawFetch(input, init);
+  const opts = { ...(init || {}) };
+  const hd = new Headers(opts.headers || {});
+  if (!hd.has('X-OI-Auth')) hd.set('X-OI-Auth', '1');
+  opts.headers = hd;
+  const r = await _rawFetch(input, opts);
+  if (AUTH.enabled && (r.status === 401 || r.status === 403)) {
+    let need = null;
+    if (r.status === 403) { try { need = (await r.clone().json()).need; } catch (e) {} }
+    authResponseSeen(u.pathname, r.status, need);
+  }
+  return r;
+};
+
+// The session ended under us (expired, signed out elsewhere, user removed
+// or changed): back to the sign-in screen, which then reloads into the app
+let setRootView = null;
+function authLapsed() {
+  if (setRootView) setRootView({ view: 'login', note: 'Your session has ended — sign in again.' });
+}
+
+async function authLoadState() {
+  try {
+    const r = await _rawFetch('/auth/state', { headers: { 'X-OI-Auth': '1' }, cache: 'no-store' });
+    // Older firmware (no /auth/*): sign-in doesn't exist there
+    if (!r.ok) return { enabled: false };
+    return await r.json();
+  } catch (e) { return { enabled: false }; }
+}
+
+function authApply(st) {
+  AUTH.enabled = st.enabled === true;
+  AUTH.user = st.user || null;
+  AUTH.role = AUTH.enabled ? (st.role || null) : 'admin';
+  AUTH.remember = st.remember === true;
+  if (st.password_min) AUTH.passwordMin = st.password_min;
+  document.body.classList.toggle('auth-on', AUTH.enabled);
+  for (const r of ['viewer', 'operator', 'admin']) document.body.classList.toggle('role-' + r, AUTH.enabled && AUTH.role === r);
+}
+
+async function authPost(path, fields) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(fields).toString(),
+  });
+  let body = {};
+  try { body = await r.json(); } catch (e) {}
+  if (!r.ok) {
+    const err = new Error(body.error || ('HTTP ' + r.status));
+    err.status = r.status;
+    err.retryAfter = parseInt(r.headers.get('Retry-After')) || 0;
+    throw err;
+  }
+  return body;
+}
+
+async function authSignOut() {
+  try { await authPost('/auth/logout', {}); } catch (e) {}
+  location.reload();
+}
+
+// Wraps controls a role can't use: disabled (inert) and dimmed. Purely a
+// courtesy — the device refuses the request anyway.
+// Allowed: no wrapper at all, so the DOM is exactly what it was before
+// sign-in existed. Blocked: a display:contents wrapper (keeps flex layouts);
+// don't use it inside CSS multi-column containers (Chromium drops such
+// children from the columns) — mark the container inert instead.
+const Gate = ({ need, children }) => {
+  if (can(need)) return children;
+  return html`<div class="perm-gate" inert data-need=${need}>${children}</div>`;
+};
+
 // ==================== API ====================
 const api = {
   _cache: {},
@@ -157,6 +281,7 @@ const api = {
   // two overlapping uploads could otherwise finish out of order and persist
   // the stale one
   saveFavorites(paramFavs, spotFavs) {
+    if (!can('operator')) return; // viewers: favourites stay in this page only
     this._favData = { p: paramFavs || [], s: spotFavs || [] };
     clearTimeout(this._favTimer);
     this._favTimer = setTimeout(async () => {
@@ -239,6 +364,7 @@ const initialState = {
 // the device (presets.json) and carried by the settings export wholesale.
 
 function savePresetsToDevice(presets) {
+  if (!can('operator')) return Promise.resolve();
   const blob = new Blob([JSON.stringify({ v: 1, presets })], { type: 'application/json' });
   const fd = new FormData();
   fd.append('updatefile', blob, 'presets.json');
@@ -280,6 +406,7 @@ async function loadParamLog() {
   return _paramLog;
 }
 function writeParamLog(entries) {
+  if (!can('operator')) return Promise.resolve();
   const fd = new FormData();
   fd.append('updatefile', new Blob([JSON.stringify({ v: 1, entries })], { type: 'application/json' }), 'paramlog.json');
   return fetch('/edit', { method: 'POST', body: fd }).catch(() => {});
@@ -549,6 +676,7 @@ const ICONS = {
   life: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="4.93" y1="4.93" x2="9.17" y2="9.17"/><line x1="14.83" y1="14.83" x2="19.07" y2="19.07"/><line x1="14.83" y1="9.17" x2="19.07" y2="4.93"/><line x1="4.93" y1="19.07" x2="9.17" y2="14.83"/>',
   compare: '<polyline points="8 7 3 12 8 17"/><polyline points="16 7 21 12 16 17"/><line x1="3" y1="12" x2="21" y2="12"/>',
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
 };
 const Icon = ({ n, size = 13 }) => html`<span class="btn-ic" dangerouslySetInnerHTML=${{
   __html: '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (ICONS[n] || '') + '</svg>'
@@ -692,7 +820,7 @@ const Navbar = () => {
         <div class="control" style="flex-direction:column;align-items:flex-start;gap:2px">
           <span style="font-size:.65rem;text-transform:uppercase;letter-spacing:.05em">CAN Device</span>
           <div class="can-node-select">
-            <select value=${state.canActiveNodeId} onchange=${e => {
+            <select value=${state.canActiveNodeId} disabled=${!can('operator')} onchange=${e => {
               const id = parseInt(e.target.value);
               dispatch({ type: 'SET_CAN_NODE', payload: id });
               fetch('/set-can-node?id=' + id);
@@ -711,6 +839,17 @@ const Navbar = () => {
         const label = state.canMode ? 'CAN #' + state.canActiveNodeId : 'UART';
         return html`<div style="text-align:center;padding:4px 0 0"><span style="background:${ok ? 'var(--green)' : 'var(--red)'};color:${ok ? '#06301d' : '#fff'};padding:2px 8px;border-radius:10px;font-size:.65rem;font-weight:700;letter-spacing:.03em">${label}</span></div>`;
       })()}
+      ${AUTH.enabled && html`
+        <div id="whoami" class="whoami" title=${AUTH.user + ' — ' + (ROLE_LABEL[AUTH.role] || AUTH.role) + ' (open your account)'}
+          onclick=${() => { history.replaceState(null, '', '#settings/users'); dispatch({ type: 'SET_ACTIVE_TAB', payload: 'settings' }); }}>
+          <span class="user-avatar">${(AUTH.user || '?').slice(0, 2).toUpperCase()}</span>
+          <span class="whoami-text">
+            <span class="whoami-name">${AUTH.user}</span>
+            <span class="role-pill role-${AUTH.role}">${AUTH.role === 'viewer' ? 'Read-only' : ROLE_LABEL[AUTH.role]}</span>
+          </span>
+        </div>
+        <button id="signout" class="signout" onclick=${authSignOut} title="Sign out"><${Icon} n="logout" /><span class="navbar-text">Sign out</span></button>
+      `}
     </aside>
   `;
 };
@@ -752,11 +891,13 @@ const Dashboard = () => {
     <div id="dashboard" class="tabdiv main-content" style="display:flex">
       <div class="main-right">
         <h3 class="underline">Actions</h3>
+        <${Gate} need="operator">
         <button onclick=${() => api.getText('start 2').then(r => dispatch({ type: 'SET_MESSAGES', payload: r }))}><${Icon} n="play" />Start inverter in manual mode</button>
         <button onclick=${() => api.getText('stop').then(r => dispatch({ type: 'SET_MESSAGES', payload: r }))}><${Icon} n="stop" />Stop inverter</button>
+        </${Gate}>
         <h3 class="underline">Reset</h3>
-        <button onclick=${() => setConfirmAction('inverter')}><${Icon} n="rotate" />Reboot Inverter</button>
-        <button onclick=${() => setConfirmAction('esp32')}><${Icon} n="power" />Reboot ESP32</button>
+        <${Gate} need="operator"><button onclick=${() => setConfirmAction('inverter')}><${Icon} n="rotate" />Reboot Inverter</button></${Gate}>
+        <${Gate} need="admin"><button onclick=${() => setConfirmAction('esp32')}><${Icon} n="power" />Reboot ESP32</button></${Gate}>
       </div>
       <div class="main-left">
         <h2>Dashboard</h2>
@@ -820,6 +961,7 @@ const Dashboard = () => {
         <div class="dash-row">
           <div class="dash-box" style="flex:1">
             <h3>CAN Message</h3>
+            <${Gate} need="operator">
             <div style="display:flex;gap:8px;align-items:flex-end">
               <label style="font-size:.75rem;flex:1">CAN ID (hex)
                 <input type="text" value=${canId} oninput=${e => setCanId(e.target.value)} style="width:100%;font-size:.75rem;padding:4px 6px;font-family:var(--mono)" />
@@ -833,6 +975,7 @@ const Dashboard = () => {
                 setCmdOutput(o => o + 'CAN: ' + JSON.stringify(json) + '\n');
               }} style="font-size:.75rem;padding:6px 14px;white-space:nowrap"><${Icon} n="send" />Send</button>
             </div>
+            </${Gate}>
           </div>
         </div>
         `}
@@ -1156,12 +1299,16 @@ const Parameters = () => {
         </button>
         <div class="collapsible-actions ${actionsOpen ? 'open' : ''}">
         <h3 class="underline">Save & Load</h3>
+        <${Gate} need="operator">
         <button onclick=${() => api.getText('save').then(r => alert(r || 'Parameters saved'))}><${Icon} n="save" />Save parameters to flash</button>
         <button onclick=${() => api.getText('load')}><${Icon} n="undo" />Restore parameters from flash</button>
+        </${Gate}>
         <a download="params.json" href=${'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(state.params, null, 2))}><button><${Icon} n="download" />Download parameters file</button></a>
         ${/* No accept filter: Android pickers report .json as octet-stream/plain and grey it out; we validate JSON in loadParamsFromFile instead. */ ''}
+        <${Gate} need="operator">
         <input id="paramfile" type="file" hidden onchange=${loadParamsFromFile} />
         <label class="butt" for="paramfile"><${Icon} n="upload" />Load parameters from file</label>
+        </${Gate}>
         ${/* Compare: a read-only diff of a params file against the live values */ ''}
         <input id="comparefile" type="file" hidden onchange=${compareParamsFile} />
         <label class="butt" for="comparefile"><${Icon} n="compare" />Compare to file</label>
@@ -1174,6 +1321,7 @@ const Parameters = () => {
           <p id="progress-msg">${applyMsg}</p>
         `}
         <h3 class="underline">Presets</h3>
+        <${Gate} need="operator">
         ${state.presets.map(pr => html`
           <div class="preset-row" key=${pr.id}>
             <span class="preset-name" title=${Object.keys(pr.params || {}).length + ' parameter(s)'}>${pr.name}</span>
@@ -1185,10 +1333,13 @@ const Parameters = () => {
         `)}
         <button onclick=${() => openPresetEditor(null)}><${Icon} n="plus" />New preset</button>
         ${state.presets.length === 0 && html`<p style="font-size:.72rem;color:var(--text3);margin:.25rem 0 0">A preset is a named set of parameter values you can apply in one tap — here, or from an Action button on a gauges page.</p>`}
+        </${Gate}>
         <h3 class="underline">Parameter Database</h3>
         <button onclick=${submitToDatabase}><${Icon} n="cloud" />Submit parameters</button>
+        <${Gate} need="operator">
         <button onclick=${() => setShowSubscribe(true)}><${Icon} n="rss" />Subscribe to parameter set</button>
         <button onclick=${stopSubscription}><${Icon} n="x" />Stop subscription</button>
+        </${Gate}>
         <h3 class="underline">Misc</h3>
         <a href="/syncofs.html" target="_blank"><button><${Icon} n="external" />Launch syncofs tuner</button></a>
         <a href="https://openinverter.org/wiki/Parameters" target="_blank"><button><${Icon} n="book" />Parameter reference</button></a>
@@ -1215,14 +1366,14 @@ const Parameters = () => {
                   <td><div class="tooltip">${p.name}<span class="tooltiptext ${docstrings.get(p.name) ? '' : 'tooltiptext-empty'}">${docstrings.get(p.name) || 'No description available.'}</span></div></td>
                   <td>
                     ${p.enums ? html`
-                      <select class="styled" value=${String(p.value)} onchange=${e => saveParam(p.name, e.target.value)}>
+                      <select class="styled" value=${String(p.value)} disabled=${!can('operator')} onchange=${e => saveParam(p.name, e.target.value)}>
                         ${Object.keys(p.enums).map(k => html`<option value=${k}>${p.enums[k]}</option>`)}
                       </select>
                     ` : html`
                       ${/* Always-editable: focusing snapshots the value so the
                           poll can't revert keystrokes; Enter/blur commit only
                           when the value actually changed, Escape reverts */ ''}
-                      <input type="number" min=${p.minimum} max=${p.maximum} step="0.05"
+                      <input type="number" min=${p.minimum} max=${p.maximum} step="0.05" readonly=${!can('operator')}
                         value=${editing === p.name ? editValue : p.value}
                         onfocus=${() => { setEditing(p.name); setEditValue(String(p.value)); }}
                         oninput=${e => { if (editing !== p.name) setEditing(p.name); // Enter ends the session but keeps focus
@@ -1910,8 +2061,10 @@ const Update = () => {
   const flashEsp = (file) => new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/espupdate');
+    xhr.setRequestHeader('X-OI-Auth', '1');
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) setProgress(Math.round(100 * e.loaded / e.total)); };
     xhr.onload = () => {
+      if (xhr.status === 401 || xhr.status === 403) authResponseSeen('/espupdate', xhr.status, 'admin');
       let ok = xhr.status === 200;
       try { ok = JSON.parse(xhr.responseText).ok; } catch (err) {}
       if (ok) resolve();
@@ -1953,6 +2106,7 @@ const Update = () => {
   return html`
     <div id="update" class="tabdiv main-content" style="display:flex">
       <div class="main-right">
+        <${Gate} need="admin">
         <h3 class="underline">Inverter/VCU Firmware</h3>
         <form id="upload-firmware-form" enctype="multipart/form-data">
           <input id="update-firmware-file" name="update-firmware-file" type="file" accept=".bin" ref=${fileRef} hidden onchange=${installFirmware} />
@@ -2015,10 +2169,12 @@ const Update = () => {
           </div>
           <p id="progress-msg">${updateMsg}</p>
         `}
+        </${Gate}>
       </div>
       <div class="main-left">
         <h2>Update</h2>
         <p>On this page you can apply software updates to your OpenInverter system.</p>
+        ${!can('admin') && html`<p class="perm-note" id="update-perm-note">Firmware updates need an <b>admin</b> account — you are signed in as ${ROLE_LABEL[AUTH.role] || AUTH.role}.</p>`}
         <div class="dash-box compact" style="margin-bottom:1rem">
           <h3>Inverter / VCU Firmware</h3>
           <p>Updates the firmware on the <b>inverter or VCU board itself</b> (stm32_sine, stm32_foc, ZombieVerter…) — not this web interface.</p>
@@ -2031,7 +2187,7 @@ const Update = () => {
           <p>A daily check flags newer releases with a badge in the sidebar (toggle it off with <b>Daily update check</b>). When one is available its release list loads automatically; otherwise <b>Get releases</b> lists them from the GitHub repo above (pre-filled with the repo this build came from). The image for your board is selected by default — then <b>Download & install</b>, or use <b>Install OTA image from file</b> to flash one you built locally.</p>
           <p><b>Update channel</b>: <b>Stable</b> (default) offers tested releases only. <b>Dev</b> also offers the pre-releases (<code>vX.Y-dev.N</code>) built from every change on the dev branch — newer, less tested; a dev device still moves on to the stable release that follows them.</p>
           <p>Use <b>Upload single file</b> for individual file tweaks.</p>
-          <p><b>Updating erases your saved settings and favourites</b> — the whole filesystem is replaced. Use <b>Export settings (backup)</b> first, then restore them from Settings afterwards.</p>
+          <p><b>Updating erases your saved settings and favourites</b> — the whole filesystem is replaced. Use <b>Export settings (backup)</b> first, then restore them from Settings afterwards. User accounts are kept: they are stored outside the filesystem.</p>
           <p style="font-size:.8rem;color:var(--text3);margin:0">The bootloader and partition table aren't touched, so a bad image stays recoverable over USB. The web interface reboots and the page reloads when done.</p>
         </div>
       </div>
@@ -2289,6 +2445,7 @@ const Plot = () => {
   };
 
   const savePlots = async () => {
+    if (!can('operator')) return;
     try {
       const json = JSON.stringify({ plots, maxValues, burstLength });
       const blob = new Blob([json], { type: 'application/json' });
@@ -2565,6 +2722,7 @@ const CanMapping = () => {
     <div id="canmapping" class="tabdiv main-content" style="display:flex">
       <div class="main-right">
         <h3 class="underline">Actions</h3>
+        <${Gate} need="operator">
         <button onclick=${() => setMappings([...mappings, { name: '', txrx: 'tx', canid: 0, pos: 0, bits: 8, gain: 1 }])}><${Icon} n="plus" />Add new mapping</button>
         <button onclick=${saveMappings}><${Icon} n="save" />Save mappings to flash</button>
         ${state.canMode && html`<button onclick=${loadMappings}><${Icon} n="refresh" />Reload from device</button>`}
@@ -2575,6 +2733,7 @@ const CanMapping = () => {
           setMappings([]);
           loadMappings();
         }} style="color:var(--red)"><${Icon} n="trash" />Remove all mappings</button>
+        </${Gate}>
       </div>
       <div class="main-left">
         <h2>CAN Mapping</h2>
@@ -2597,7 +2756,7 @@ const CanMapping = () => {
                     <td>${m.length}</td>
                     <td>${m.gain}</td>
                     <td>${m.offset}</td>
-                    <td><button onclick=${() => removeMap(m)} style="padding:2px 6px;font-size:.7rem;color:var(--red)">✕</button></td>
+                    <td><button onclick=${() => removeMap(m)} disabled=${!can('operator')} style="padding:2px 6px;font-size:.7rem;color:var(--red)">✕</button></td>
                   </tr>
                 `)}
               </tbody>
@@ -2617,6 +2776,7 @@ const CanMapping = () => {
             `}
           `;
         })()}
+        <${Gate} need="operator">
         <h3 class="underline">New mappings</h3>
         <table style="width:auto;table-layout:auto">
           <thead><tr><th style="min-width:110px">Spot Value</th><th>TX/RX</th><th style="min-width:60px">CAN ID</th><th style="min-width:50px">Offset</th><th style="min-width:50px">Length</th><th style="min-width:50px">Gain</th><th></th></tr></thead>
@@ -2675,6 +2835,7 @@ const CanMapping = () => {
             ${virtMsg && html`<span style="font-size:.78rem;color:var(--green)">${virtMsg}</span>`}
           </div>
         `}
+        </${Gate}>
       </div>
     </div>
   `;
@@ -2688,6 +2849,7 @@ const Files = () => {
     <div id="files" class="tabdiv main-content" style="display:flex">
       <div class="main-right">
         <h3 class="underline">Actions</h3>
+        <${Gate} need="operator">
         <form enctype="multipart/form-data">
           <input id="updatefile2" name="updatefile" type="file" hidden onchange=${async e => {
             const fd = new FormData(e.target.form);
@@ -2696,6 +2858,7 @@ const Files = () => {
           }} />
           <label class="butt" for="updatefile2"><${Icon} n="upload" />Upload file</label>
         </form>
+        </${Gate}>
       </div>
       <div class="main-left">
         <h2>Files</h2>
@@ -2706,7 +2869,7 @@ const Files = () => {
               <tr key=${f.name}>
                 <td>${f.name}</td>
                 <td>${f.size}</td>
-                <td><button onclick=${async () => { await api.deleteFile(f.name); dispatch({ type: 'SET_FILE_LIST', payload: await api.getFileList() }); }}>Delete</button></td>
+                <td><button disabled=${!can('operator')} onclick=${async () => { await api.deleteFile(f.name); dispatch({ type: 'SET_FILE_LIST', payload: await api.getFileList() }); }}>Delete</button></td>
               </tr>
             `)}
           </tbody>
@@ -2788,6 +2951,7 @@ const uiPrefsReady = fetch('/uiprefs.json').then(r => r.ok ? r.json() : null).th
 // Debounced (the colour picker fires per mouse-move) write-back to the ESP
 let _uiPrefsTimer;
 function saveUiPrefsToDevice() {
+  if (!can('operator')) return; // viewers: appearance stays per browser
   clearTimeout(_uiPrefsTimer);
   _uiPrefsTimer = setTimeout(() => {
     const blob = new Blob([JSON.stringify({ theme: getTheme(), accentColor: getAccent() || '', dashMetrics: getDashMetrics(), updateCheck: getUpdateCheckAuto(), updateChannel: getUpdateChannel() })], { type: 'application/json' });
@@ -2962,6 +3126,213 @@ const UART_BOARD_PRESETS = [
   { id: 'esp32-uart0', name: 'ESP32 default UART0 (TX1 / RX3)', arch: 'esp32', rx: 3, tx: 1 },
 ];
 
+// ==================== Users & access (Settings) ====================
+// Sign-in off: explain it and offer the first (admin) account, which turns
+// it on. Sign-in on: your account (password, sign out) for everyone, the
+// user list for admins.
+
+const PasswordFields = ({ prefix, pw, setPw, pw2, setPw2, label = 'Password' }) => html`
+  <label class="auth-field">${label}
+    <input id=${prefix + '-pw'} type="password" autocomplete="new-password" value=${pw} oninput=${e => setPw(e.target.value)} />
+  </label>
+  <label class="auth-field">Confirm ${label.toLowerCase()}
+    <input id=${prefix + '-pw2'} type="password" autocomplete="new-password" value=${pw2} oninput=${e => setPw2(e.target.value)} />
+  </label>`;
+
+function passwordProblem(pw, pw2) {
+  if (pw.length < AUTH.passwordMin) return 'Use at least ' + AUTH.passwordMin + ' characters.';
+  if (pw !== pw2) return 'The passwords don\'t match.';
+  return '';
+}
+
+const RoleSelect = ({ id, value, onChange, disabled }) => html`
+  <select id=${id} class="styled" value=${value} disabled=${disabled} onchange=${e => onChange(e.target.value)}>
+    ${['viewer', 'operator', 'admin'].map(r => html`<option value=${r}>${ROLE_LABEL[r]}</option>`)}
+  </select>`;
+
+const RoleGuide = () => html`
+  <ul class="role-guide">
+    ${['viewer', 'operator', 'admin'].map(r => html`<li key=${r}><b>${ROLE_LABEL[r]}</b> — ${ROLE_HELP[r]}</li>`)}
+  </ul>`;
+
+const FirstAdminCard = () => {
+  const [name, setName] = useState('');
+  const [pw, setPw] = useState('');
+  const [pw2, setPw2] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const create = async () => {
+    const problem = !name.trim() ? 'Choose a user name.' : passwordProblem(pw, pw2);
+    if (problem) { setErr(problem); return; }
+    setBusy(true); setErr('');
+    try {
+      await authPost('/auth/users', { op: 'add', user: name.trim().toLowerCase(), password: pw, role: 'admin' });
+      location.reload(); // signed in as the new admin; every page now needs sign-in
+    } catch (e) { setErr(e.message); setBusy(false); }
+  };
+  return html`
+    <div class="dash-box compact" id="users-setup">
+      <h3>Users & access</h3>
+      <p class="auth-lead">Sign-in is <b>off</b>: anyone who can reach this module can view and change everything,
+        exactly as before. Create an admin account to require sign-in — then add read-only or operator accounts for others.</p>
+      <${RoleGuide} />
+      <p class="settings-subhead">Create the first admin</p>
+      <div class="auth-form">
+        <label class="auth-field">User name
+          <input id="setup-user" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32"
+            value=${name} oninput=${e => setName(e.target.value)} placeholder="e.g. admin" />
+        </label>
+        <${PasswordFields} prefix="setup" pw=${pw} setPw=${setPw} pw2=${pw2} setPw2=${setPw2} />
+        ${err && html`<p class="auth-err" role="alert">${err}</p>`}
+        <button id="setup-create" class="primary" onclick=${create} disabled=${busy}><${Icon} n="check" />${busy ? 'Creating…' : 'Create admin and turn on sign-in'}</button>
+      </div>
+      <p class="auth-hint">Forgot the password later? Hold the board's BOOT button for 10 seconds (or type <code>auth reset</code>
+        on its serial port) to delete all users and turn sign-in off again. Passwords are stored hashed (PBKDF2), never in plain text.
+        The connection is plain HTTP, so use this on a network you trust.</p>
+    </div>`;
+};
+
+const MyAccountCard = () => {
+  const [oldPw, setOldPw] = useState('');
+  const [pw, setPw] = useState('');
+  const [pw2, setPw2] = useState('');
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+  const change = async () => {
+    const problem = passwordProblem(pw, pw2);
+    if (problem) { setErr(problem); return; }
+    setErr(''); setMsg('');
+    try {
+      await authPost('/auth/password', { old: oldPw, new: pw });
+      setOldPw(''); setPw(''); setPw2('');
+      setMsg('Password changed — your other sessions were signed out.');
+    } catch (e) { setErr(e.status === 429 ? 'Too many attempts — try again in a few minutes.' : e.message); }
+  };
+  return html`
+    <div class="dash-box compact" id="my-account">
+      <h3>Your account</h3>
+      <div class="me-row">
+        <span class="user-avatar lg">${(AUTH.user || '?').slice(0, 2).toUpperCase()}</span>
+        <div style="flex:1;min-width:0">
+          <div class="me-name">${AUTH.user}</div>
+          <span class="role-pill role-${AUTH.role}">${ROLE_LABEL[AUTH.role] || AUTH.role}</span>
+        </div>
+        <button id="settings-signout" onclick=${authSignOut}><${Icon} n="logout" />Sign out</button>
+      </div>
+      <p class="auth-lead">${ROLE_HELP[AUTH.role] || ''}.</p>
+      <p class="settings-subhead">Change password</p>
+      <div class="auth-form">
+        <label class="auth-field">Current password
+          <input id="me-old" type="password" autocomplete="current-password" value=${oldPw} oninput=${e => setOldPw(e.target.value)} />
+        </label>
+        <${PasswordFields} prefix="me" pw=${pw} setPw=${setPw} pw2=${pw2} setPw2=${setPw2} label="New password" />
+        ${err && html`<p class="auth-err" role="alert">${err}</p>`}
+        ${msg && html`<p class="auth-ok" role="status">${msg}</p>`}
+        <button id="me-change" onclick=${change}><${Icon} n="save" />Change password</button>
+      </div>
+    </div>`;
+};
+
+const UserListCard = () => {
+  const [users, setUsers] = useState(null);
+  const [max, setMax] = useState(8);
+  const [err, setErr] = useState('');
+  const [resetFor, setResetFor] = useState(null);
+  const [rpw, setRpw] = useState('');
+  const [rpw2, setRpw2] = useState('');
+  const [nu, setNu] = useState({ name: '', role: 'viewer' });
+  const [npw, setNpw] = useState('');
+  const [npw2, setNpw2] = useState('');
+  const load = async () => {
+    try {
+      const r = await fetch('/auth/users');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      setUsers(d.users || []);
+      if (d.max) setMax(d.max);
+    } catch (e) { setErr('Could not load users: ' + e.message); }
+  };
+  useEffect(() => { load(); }, []);
+  const op = async (fields, okMsg) => {
+    setErr('');
+    try {
+      await authPost('/auth/users', fields);
+      if (okMsg) showToast(okMsg, 'ok');
+      await load();
+      return true;
+    } catch (e) { setErr(e.message); await load(); return false; }
+  };
+  const add = async () => {
+    const problem = !nu.name.trim() ? 'Choose a user name.' : passwordProblem(npw, npw2);
+    if (problem) { setErr(problem); return; }
+    if (await op({ op: 'add', user: nu.name.trim().toLowerCase(), password: npw, role: nu.role }, nu.name.trim().toLowerCase() + ' added')) {
+      setNu({ name: '', role: 'viewer' }); setNpw(''); setNpw2('');
+    }
+  };
+  const resetPw = async () => {
+    const problem = passwordProblem(rpw, rpw2);
+    if (problem) { setErr(problem); return; }
+    if (await op({ op: 'password', user: resetFor, password: rpw }, 'Password set for ' + resetFor + ' — their sessions were signed out')) {
+      setResetFor(null); setRpw(''); setRpw2('');
+    }
+  };
+  return html`
+    <div class="dash-box compact" id="user-list">
+      <h3>Users</h3>
+      <p class="auth-lead">Changing a role or password, or removing a user, signs that user out everywhere.</p>
+      ${err && html`<p class="auth-err" role="alert">${err}</p>`}
+      ${users === null ? html`<${Spinner} />` : html`
+        <ul class="user-rows">
+          ${users.map(u => html`
+            <li class="user-row" key=${u.name} data-user=${u.name}>
+              <span class="user-avatar">${u.name.slice(0, 2).toUpperCase()}</span>
+              <span class="user-name">${u.name}${u.name === AUTH.user ? html` <span class="you">(you)</span>` : ''}</span>
+              <${RoleSelect} id=${'role-' + u.name} value=${u.role} disabled=${u.name === AUTH.user}
+                onChange=${role => op({ op: 'role', user: u.name, role }, u.name + ' is now ' + ROLE_LABEL[role])} />
+              <div class="user-actions">
+                <button onclick=${() => { setResetFor(u.name); setRpw(''); setRpw2(''); }}><${Icon} n="edit" size=${11} />Password</button>
+                ${u.name !== AUTH.user && html`<button class="danger" onclick=${() => {
+                  if (confirm('Remove ' + u.name + '? They are signed out at once.')) op({ op: 'remove', user: u.name }, u.name + ' removed');
+                }}><${Icon} n="trash" size=${11} />Remove</button>`}
+              </div>
+            </li>`)}
+        </ul>
+      `}
+      ${users && users.length < max ? html`
+        <p class="settings-subhead">Add a user</p>
+        <div class="auth-form">
+          <label class="auth-field">User name
+            <input id="new-user" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32"
+              value=${nu.name} oninput=${e => setNu({ ...nu, name: e.target.value })} />
+          </label>
+          <label class="auth-field">Role <${RoleSelect} id="new-role" value=${nu.role} onChange=${role => setNu({ ...nu, role })} /></label>
+          <${PasswordFields} prefix="new" pw=${npw} setPw=${setNpw} pw2=${npw2} setPw2=${setNpw2} />
+          <button id="new-add" class="primary" onclick=${add}><${Icon} n="plus" />Add user</button>
+        </div>
+        <${RoleGuide} />
+      ` : users && html`<p class="auth-hint">${max} users is the most this module keeps.</p>`}
+      ${resetFor && html`
+        <${Modal} id="reset-pw" title=${'New password for ' + resetFor} onClose=${() => setResetFor(null)}>
+          <div class="auth-form">
+            <${PasswordFields} prefix="reset" pw=${rpw} setPw=${setRpw} pw2=${rpw2} setPw2=${setRpw2} label="New password" />
+            ${err && html`<p class="auth-err" role="alert">${err}</p>`}
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button onclick=${() => setResetFor(null)}>Cancel</button>
+              <button id="reset-save" class="primary" onclick=${resetPw}><${Icon} n="save" />Set password</button>
+            </div>
+          </div>
+        </${Modal}>`}
+    </div>`;
+};
+
+const UsersPanel = () => {
+  if (!AUTH.enabled) return html`<${FirstAdminCard} />`;
+  return html`
+    <${MyAccountCard} />
+    ${can('admin') ? html`<${UserListCard} />` : html`
+      <div class="dash-box compact"><h3>Users</h3><p class="auth-lead">Only an admin can add or change users.</p></div>`}`;
+};
+
 const Settings = () => {
   const { state, dispatch } = useContext(Store);
   const [uartRxPin, setUartRxPin] = useState(1); // configurable UART pins (default GPIO1/3)
@@ -3089,7 +3460,7 @@ const Settings = () => {
   // deep-linkable as #settings/device|web|config
   const [subTab, setSubTab] = useState(() => {
     const s = parseHash().sub;
-    return (s === 'web' || s === 'config') ? s : 'device';
+    return (s === 'web' || s === 'config' || s === 'users') ? s : 'device';
   });
   const pickSubTab = (s) => {
     setSubTab(s);
@@ -3144,8 +3515,8 @@ const Settings = () => {
           });
         }
       } catch (e) { /* use default */ }
-      // Load WiFi info
-      try {
+      // Load WiFi info (an admin's: the device refuses it to others)
+      if (can('admin')) try {
         const r = await fetch('/wifi');
         if (r.ok) {
           const html = await r.text();
@@ -3215,8 +3586,11 @@ const Settings = () => {
           <button class="page-pill ${subTab === 'device' ? 'active' : ''}" onclick=${() => pickSubTab('device')}>Device & Connection</button>
           <button class="page-pill ${subTab === 'web' ? 'active' : ''}" onclick=${() => pickSubTab('web')}>Web Interface</button>
           <button class="page-pill ${subTab === 'config' ? 'active' : ''}" onclick=${() => pickSubTab('config')}>Configuration</button>
+          <button id="settings-users-tab" class="page-pill ${subTab === 'users' ? 'active' : ''}" onclick=${() => pickSubTab('users')}>Users & Access</button>
         </div>
-        <div class="settings-grid">
+        ${subTab === 'device' && !can('admin') && html`<p class="perm-note" id="settings-perm-note">Device settings are read-only for your account — changing them needs an <b>admin</b>.</p>`}
+        <div class="settings-grid" inert=${(subTab === 'device' && !can('admin')) || undefined}>
+        ${subTab === 'users' && html`<${UsersPanel} />`}
         ${subTab === 'device' && html`
 
         <div class="dash-box compact">
@@ -3496,8 +3870,10 @@ const Settings = () => {
           <p style="font-size:.8rem;margin:0 0 .5rem">Back up or restore favourites, gauge pages, presets, plot layouts and UI preferences as a single file.</p>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button onclick=${exportUiSettings} style="width:auto"><${Icon} n="download" />Export settings</button>
+            <${Gate} need="operator">
             <input id="ui-settings-import" type="file" hidden onchange=${importUiSettings} />
             <label class="butt" for="ui-settings-import" style="width:auto"><${Icon} n="upload" />Import settings</label>
+            </${Gate}>
           </div>
         </div>
 
@@ -3508,9 +3884,11 @@ const Settings = () => {
             <div class="preset-row" key=${item.key} style="flex-wrap:nowrap">
               <span class="preset-name" style="flex:1 1 auto">${item.label}</span>
               <button onclick=${() => exportSingle(item)} title=${'Download ' + item.file}><${Icon} n="download" size=${11} />Backup</button>
+              <${Gate} need="operator">
               <input id=${'single-import-' + item.key} type="file" hidden onchange=${e => importSingle(item, e)} />
               <label class="butt" for=${'single-import-' + item.key} title=${'Upload a ' + item.file + ' backup'}
                 style="width:auto;height:24px;padding:0 9px;font-size:.7rem;line-height:1;justify-content:center"><${Icon} n="upload" size=${11} />Restore</label>
+              </${Gate}>
             </div>
           `)}
           <p style="font-size:.72rem;color:var(--text3);margin:.35rem 0 0">Restoring replaces that file on the device and reloads the page.</p>
@@ -4312,16 +4690,16 @@ const GaugeTileBody = ({ g, title, value, value2, unit, enums, editing, canMode,
         ? html`<${TextTile} value=${value} unit=${unit} enums=${enums} text=${g.text || ''}
             decimals=${g.decimals != null ? g.decimals : 1} w=${w - 6} h=${gh - (gh < 20 ? 0 : 4)} />`
         : (g.type === 'action')
-        ? html`<${ActionTile} g=${g} canMode=${canMode} editing=${editing} presets=${presets} w=${w - 10} h=${gh - 8} />`
+        ? html`<${Gate} need="operator"><${ActionTile} g=${g} canMode=${canMode} editing=${editing} presets=${presets} w=${w - 10} h=${gh - 8} /></${Gate}>`
         : (g.type === 'bar')
         ? html`<${BarGauge} value=${value} unit=${unit} enums=${enums} color=${g.color || ''}
             decimals=${g.decimals != null ? g.decimals : 1} min=${g.min != null ? g.min : 0}
             max=${(g.max == null || g.max === 0) ? 4000 : g.max} w=${w - 8} h=${gh - 4}
             warn=${g.warn} warnColor=${g.warnColor} center=${g.center} invertScale=${!!g.invertScale} peaks=${peaks} revColor=${g.revColor || ''} />`
         : (g.type === 'toggle')
-        ? html`<${ToggleTile} g=${g} value=${value} canMode=${canMode} editing=${editing} px=${Math.max(20, Math.min(w, gh) - 4)} />`
+        ? html`<${Gate} need="operator"><${ToggleTile} g=${g} value=${value} canMode=${canMode} editing=${editing} px=${Math.max(20, Math.min(w, gh) - 4)} /></${Gate}>`
         : (g.type === 'slider')
-        ? html`<${SliderTile} g=${g} value=${value} editing=${editing} w=${w - 18} h=${gh - 4} />`
+        ? html`<${Gate} need="operator"><${SliderTile} g=${g} value=${value} editing=${editing} w=${w - 18} h=${gh - 4} /></${Gate}>`
         : html`<${SvgGauge} id=${g.id} value=${value} unit=${unit} color=${g.color || ''} enums=${enums}
             px=${Math.max(40, Math.min(w, gh) - 4)} decimals=${g.decimals != null ? g.decimals : 1}
             min=${g.min != null ? g.min : 0} max=${(g.max == null || g.max === 0) ? 4000 : g.max}
@@ -4501,6 +4879,7 @@ const Gauges = () => {
   }, []);
 
   const persist = async (nextPages, auto = autoPage) => {
+    if (!can('operator')) return;
     try {
       const blob = new Blob([JSON.stringify({ v: 3, autoPage: auto, pages: nextPages })], { type: 'application/json' });
       const fd = new FormData();
@@ -4943,13 +5322,21 @@ const Gauges = () => {
     // firmware, blocked port — falls back to the polling loop, which is
     // always available.
     if (state.ssePort && window.EventSource) {
-      const url = location.protocol + '//' + location.hostname + ':' + state.ssePort +
-        '/stream?names=' + names.join(',') + '&ms=' + interval;
-      es = new EventSource(url);
-      es.onmessage = (ev) => { if (active) applyText(ev.data); };
-      es.onerror = () => {
-        if (es) { es.close(); es = null; if (active) fetchRef.current = setTimeout(fetchLoop, 0); }
-      };
+      (async () => {
+        let ticket = '';
+        if (AUTH.enabled) {
+          try { ticket = (await (await fetch('/auth/stream-ticket')).json()).ticket || ''; } catch (e) {}
+          if (!active) return;
+          if (!ticket) { fetchRef.current = setTimeout(fetchLoop, 0); return; } // poll instead
+        }
+        const url = location.protocol + '//' + location.hostname + ':' + state.ssePort +
+          '/stream?names=' + names.join(',') + '&ms=' + interval + (ticket ? '&t=' + ticket : '');
+        es = new EventSource(url);
+        es.onmessage = (ev) => { if (active) applyText(ev.data); };
+        es.onerror = () => {
+          if (es) { es.close(); es = null; if (active) fetchRef.current = setTimeout(fetchLoop, 0); }
+        };
+      })();
     } else {
       fetchRef.current = setTimeout(fetchLoop, 0);
     }
@@ -5048,7 +5435,7 @@ const Gauges = () => {
               style=${'font-size:.75rem;padding:4px 12px' + (recording ? ';color:var(--red);border-color:var(--red)' : '')}>
               ${recording ? '■ Stop' : '● Record'}</button>`}
             ${!editing && html`<button id="fullscreen-btn" onclick=${() => setKiosk(true)} title="Full screen — gauges only, all chrome hidden" style="font-size:.75rem;padding:4px 12px">⛶ Full screen</button>`}
-            ${!editing && html`<button onclick=${startEditing} style="font-size:.75rem;padding:4px 12px"><${Icon} n="edit" />Edit Layout</button>`}
+            ${!editing && can('operator') && html`<button onclick=${startEditing} style="font-size:.75rem;padding:4px 12px"><${Icon} n="edit" />Edit Layout</button>`}
           </div>
         </div>
         <div id="gauge-pages" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:.6rem">
@@ -5647,6 +6034,10 @@ const App = () => {
         <${Navbar} />
         <div id="content-wrapper">
           <div id="content-wrapper-inner" data-panel="open">
+            ${AUTH.enabled && AUTH.role === 'viewer' && html`
+              <div id="readonly-bar" class="readonly-bar" role="note">
+                <b>Read-only account</b><span class="ro-long">— you can view everything; changes need an operator or admin.</span>
+              </div>`}
             <div id="communication-error-bar" class="communication-error-bar" style=${{ display: state.commError ? 'block' : 'none' }}>
               <p>Communication problem between ESP and STM</p>
             </div>
@@ -5668,5 +6059,82 @@ const App = () => {
   `;
 };
 
+// ==================== Sign-in screen ====================
+// Phone-first: one column, big touch targets, 16px inputs (no iOS zoom),
+// the right autocomplete hints so password managers fill it.
+const LoginScreen = ({ note }) => {
+  const [name, setName] = useState(() => { try { return localStorage.getItem('lastUser') || ''; } catch (e) { return ''; } });
+  const [pw, setPw] = useState('');
+  const [remember, setRemember] = useState(() => { try { return localStorage.getItem('rememberMe') === '1'; } catch (e) { return false; } });
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const pwRef = useRef(null);
+  const userRef = useRef(null);
+  useEffect(() => { (name ? pwRef : userRef).current?.focus(); }, []);
+  const submit = async (e) => {
+    if (e) e.preventDefault();
+    if (!name.trim() || !pw) { setErr('Enter your user name and password.'); return; }
+    setBusy(true); setErr('');
+    try {
+      await authPost('/auth/login', { user: name.trim().toLowerCase(), password: pw, remember: remember ? '1' : '0' });
+      try { localStorage.setItem('lastUser', name.trim().toLowerCase()); localStorage.setItem('rememberMe', remember ? '1' : '0'); } catch (e2) {}
+      location.reload(); // a fresh page for the signed-in user
+    } catch (ex) {
+      setBusy(false);
+      setPw('');
+      if (ex.status === 429) setErr('Too many attempts. Try again in ' + Math.max(1, Math.ceil((ex.retryAfter || 60) / 60)) + ' min.');
+      else if (ex.status === 401) setErr('Incorrect user name or password.');
+      else setErr(ex.message || 'Sign-in failed');
+      pwRef.current?.focus();
+    }
+  };
+  return html`
+    <main id="login" class="login-wrap">
+      <form class="login-card" onsubmit=${submit} autocomplete="on">
+        <svg class="login-logo" viewBox="0 0 48 48" aria-hidden="true">
+          <circle cx="24" cy="24" r="21.4" fill="none" stroke="currentColor" stroke-width="2.4" opacity=".5" />
+          <path fill="none" stroke="#5b9dff" stroke-width="2.4" stroke-linecap="round" d="M6 24 C 12 11, 18 11, 24 24 C 30 37, 36 37, 42 24" />
+        </svg>
+        <h1>Sign in</h1>
+        <p class="login-sub">OpenInverter web interface</p>
+        ${note && html`<p class="login-note" role="status">${note}</p>`}
+        <label class="auth-field">User name
+          <input id="login-user" ref=${userRef} type="text" name="username" autocomplete="username" autocapitalize="none"
+            autocorrect="off" spellcheck="false" maxlength="32" value=${name} oninput=${e => setName(e.target.value)} />
+        </label>
+        <label class="auth-field">Password
+          <input id="login-password" ref=${pwRef} type="password" name="password" autocomplete="current-password"
+            value=${pw} oninput=${e => setPw(e.target.value)} />
+        </label>
+        <label class="login-remember">
+          <input id="login-remember" type="checkbox" checked=${remember} onchange=${e => setRemember(e.target.checked)} />
+          Keep me signed in on this device
+        </label>
+        ${err && html`<p class="auth-err" id="login-error" role="alert">${err}</p>`}
+        <button id="login-submit" class="primary login-btn" type="submit" disabled=${busy}>${busy ? 'Signing in…' : 'Sign in'}</button>
+        <p class="auth-hint">Leave “keep me signed in” off on a shared phone or computer. Locked out? An admin can reset
+          your password; if no admin can sign in, hold the module's BOOT button for 10 seconds to remove all users.</p>
+      </form>
+    </main>`;
+};
+
+// Decides between the sign-in screen and the app, once /auth/state answers.
+// Asked at load (not from an effect, which Preact defers to the next frame)
+// so the app appears as soon as the reply lands.
+const viewFor = (st) => ({ view: st.enabled && !st.user ? 'login' : 'app' });
+let authBooted = null;
+authLoadState().then(st => {
+  authApply(st);
+  authBooted = st;
+  if (setRootView) setRootView(viewFor(st));
+});
+const Root = () => {
+  const [view, setView] = useState(() => authBooted ? viewFor(authBooted) : { view: 'loading' });
+  setRootView = setView;
+  if (view.view === 'login') return html`<${LoginScreen} note=${view.note} />`;
+  if (view.view === 'app') return html`<${App} />`;
+  return html`<div class="auth-loading"><div class="css-spinner css-spinner-lg"></div></div>`;
+};
+
 // ==================== Mount ====================
-render(html`<${App} />`, document.body);
+render(html`<${Root} />`, document.body);
