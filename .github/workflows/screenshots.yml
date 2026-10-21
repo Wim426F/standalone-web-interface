@@ -1,0 +1,80 @@
+name: Screenshots
+
+# README screenshots (doc/screenshots/), drawn from the live demo's simulated
+# inverter by tests/screenshots/capture.mjs.
+#
+#   Pull requests touching the UI: render them and attach them to the run as
+#   an artifact, so a reviewer can see what changed. Nothing is committed.
+#   Run workflow (on dev): render them and, with "commit" ticked, commit the
+#   result to dev. They reach main with the next dev -> main PR, like any
+#   other change. main is protected and every push to it is a release, so
+#   this workflow never writes to main.
+on:
+  pull_request:
+    paths:
+      - "data/**"
+      - "demo/**"
+      - "tests/screenshots/**"
+      - ".github/workflows/screenshots.yml"
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Commit the new screenshots to this branch (not main)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: screenshots-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  capture:
+    name: Capture
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # the optional commit back to the dispatched branch
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Capture
+        run: npm run screenshots
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: screenshots
+          path: doc/screenshots/
+          retention-days: 14
+
+      - name: Commit to ${{ github.ref_name }}
+        if: github.event_name == 'workflow_dispatch' && inputs.commit
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          if [ "$BRANCH" = main ] || [ "$GITHUB_REF_TYPE" != branch ]; then
+            echo "::error::Run this on dev (or a feature branch), not $BRANCH: main only changes through pull requests"
+            exit 1
+          fi
+          git add doc/screenshots
+          if git diff --cached --quiet; then
+            echo "Screenshots unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Regenerate README screenshots"
+          git push origin "HEAD:$BRANCH"

@@ -9,6 +9,9 @@
     "mock": "node tests/mock-esp/server.mjs",
     "test:e2e": "playwright test",
     "test:scripts": "python -m unittest discover -s scripts -p \"test_*.py\"",
+    "demo": "node demo/serve.mjs",
+    "demo:build": "node demo/build.mjs",
+    "screenshots": "node tests/screenshots/capture.mjs",
     "test": "npm run lint && npm run check:gz && npm run test:scripts && npm run test:e2e"
   },
   "devDependencies": {

@@ -8,3 +8,4 @@ platformio-local-override.ini
 node_modules/
 test-results/
 playwright-report/
+_site/
