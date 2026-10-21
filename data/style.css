@@ -256,8 +256,11 @@ input:checked + .slider::before { transform: translateX(14px); }
 .toggle-row.disabled { opacity: .45; pointer-events: none; }
 .toggle-row .toggle-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* the same row holding a compact select instead of a switch */
-.toggle-row.select-row { cursor: default; }
-.toggle-row.select-row select { width: auto; margin: 0; padding: 3px 6px; font-size: .75rem; }
+/* neither part truncates here: in a narrow column the select wraps onto
+   its own line instead of squeezing the label (or its own text) */
+.toggle-row.select-row { cursor: default; flex-wrap: wrap; row-gap: 6px; }
+.toggle-row.select-row .toggle-label { flex-shrink: 0; overflow: visible; }
+.toggle-row.select-row select { width: auto; flex: none; margin: 0 0 0 auto; padding: 3px 22px 3px 6px; font-size: .75rem; }
 
 /* navbar CAN node selector: full select on desktop, compact #N on slim rail */
 .can-node-select { position: relative; width: 100%; }

@@ -2003,7 +2003,7 @@ const Update = () => {
           <span class="toggle-label">Update channel</span>
           <select id="update-channel" value=${channel} onchange=${e => onChannel(e.target.value)}>
             <option value="stable">Stable</option>
-            <option value="dev">Dev (pre-releases)</option>
+            <option value="dev">Dev</option>
           </select>
         </label>
         <${ToggleRow} label="Daily update check" checked=${autoChk}
