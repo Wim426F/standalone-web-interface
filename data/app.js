@@ -1625,6 +1625,8 @@ const Update = () => {
   const espOtaRef = useRef(null);
   // Daily new-release check master switch ("Get releases" IS the manual check)
   const [autoChk, setAutoChk] = useState(getUpdateCheckAuto);
+  // Stable / Dev release channel for the check and the release list
+  const [channel, setChannel] = useState(getUpdateChannel);
   // The daily check flagged a release newer than the running version
   const updateNewer = (() => {
     const latest = parseVer(state.updateTag), cur = parseVer(state.webVersion);
@@ -1677,17 +1679,42 @@ const Update = () => {
     if (!m) { setGhMsg('Enter a github.com repository URL'); return; }
     setGhMsg('Loading releases...');
     setGhReleases([]); setGhTag(''); setGhAssetUrl('');
+    // Read at call time: the channel select calls this right after switching
+    const ch = getUpdateChannel();
     try {
       const rels = await api.fetchReleasesFor(m[1], m[2]);
-      const list = (rels || []).map(r => ({
-        tag: r.tag_name,
-        assets: (r.assets || []).filter(a => a.name.endsWith('-ota.bin')).map(a => ({ name: a.name, url: a.browser_download_url })),
-      })).filter(r => r.assets.length);
+      // Stable hides pre-releases; Dev lists everything. Newest version
+      // first (pre-selected), so on Dev a stable release that superseded the
+      // previews wins over them; tags that aren't versions keep API order.
+      const vkey = (tag) => VERSION_TAG_RE.test(tag || '') ? parseVer(tag) : null;
+      const list = (Array.isArray(rels) ? rels : [])
+        .filter(r => !r.draft && (ch === 'dev' || !r.prerelease))
+        .map(r => ({
+          tag: r.tag_name,
+          assets: (r.assets || []).filter(a => a.name.endsWith('-ota.bin')).map(a => ({ name: a.name, url: a.browser_download_url })),
+        })).filter(r => r.assets.length)
+        .sort((a, b) => {
+          const ka = vkey(a.tag), kb = vkey(b.tag);
+          if (ka && kb) return verNewer(ka, kb) ? -1 : verNewer(kb, ka) ? 1 : 0;
+          return ka ? -1 : kb ? 1 : 0;
+        });
       setGhReleases(list);
-      if (!list.length) { setGhMsg('No OTA images (*-ota.bin) found in this repo\'s releases'); return; }
+      if (!list.length) {
+        setGhMsg('No OTA images (*-ota.bin) found in this repo\'s ' + (ch === 'dev' ? 'releases' : 'stable releases — dev pre-releases are listed on the Dev update channel'));
+        return;
+      }
       setGhTag(list[0].tag);
       applyAssetDefault(list[0].assets, targetArg);
     } catch (e) { setGhMsg('Failed: ' + e.message); }
+  };
+
+  // Switching channel re-runs the check (badge follows the new channel) and
+  // reloads the release list if one is showing
+  const onChannel = (ch) => {
+    setChannel(ch);
+    setUpdateChannel(ch);
+    if (getUpdateCheckAuto()) refreshUpdateTag(dispatch, true);
+    if (ghReleases.length || ghMsg) getGhReleases();
   };
 
   const onGhTag = (tag) => {
@@ -1972,6 +1999,13 @@ const Update = () => {
           <label class="butt" for="updatefile"><${Icon} n="upload" />Upload single file</label>
         </form>
         <div class="flex-break"></div>
+        <label class="toggle-row select-row" title="Stable: releases only. Dev: also the pre-releases built from every change on the dev branch (less tested).">
+          <span class="toggle-label">Update channel</span>
+          <select id="update-channel" value=${channel} onchange=${e => onChannel(e.target.value)}>
+            <option value="stable">Stable</option>
+            <option value="dev">Dev (pre-releases)</option>
+          </select>
+        </label>
         <${ToggleRow} label="Daily update check" checked=${autoChk}
           onChange=${v => { setAutoChk(v); setUpdateCheckAuto(v); }} />
         ${updating && html`
@@ -1995,6 +2029,7 @@ const Update = () => {
           <h3>Web Interface</h3>
           <p>Updates <b>this ESP32 module</b> — the combined <code>*-ota.bin</code> image carries the ESP32 firmware and the web pages together so they can't drift out of sync.</p>
           <p>A daily check flags newer releases with a badge in the sidebar (toggle it off with <b>Daily update check</b>). When one is available its release list loads automatically; otherwise <b>Get releases</b> lists them from the GitHub repo above (pre-filled with the repo this build came from). The image for your board is selected by default — then <b>Download & install</b>, or use <b>Install OTA image from file</b> to flash one you built locally.</p>
+          <p><b>Update channel</b>: <b>Stable</b> (default) offers tested releases only. <b>Dev</b> also offers the pre-releases (<code>vX.Y-dev.N</code>) built from every change on the dev branch — newer, less tested; a dev device still moves on to the stable release that follows them.</p>
           <p>Use <b>Upload single file</b> for individual file tweaks.</p>
           <p><b>Updating erases your saved settings and favourites</b> — the whole filesystem is replaced. Use <b>Export settings (backup)</b> first, then restore them from Settings afterwards.</p>
           <p style="font-size:.8rem;color:var(--text3);margin:0">The bootloader and partition table aren't touched, so a bad image stays recoverable over USB. The web interface reboots and the page reloads when done.</p>
@@ -2717,7 +2752,9 @@ applyAccent(getAccent());
 // Theme + accent also live on the ESP (uiprefs.json) so the look follows the
 // device across browsers, like gauge layouts do. localStorage acts as a
 // fast-start cache (no flash of the wrong theme); the device file wins.
-fetch('/uiprefs.json').then(r => r.ok ? r.json() : null).then(p => {
+// The update check waits for this (uiPrefsReady), so it runs on the device's
+// update channel, not a stale one cached in this browser.
+const uiPrefsReady = fetch('/uiprefs.json').then(r => r.ok ? r.json() : null).then(p => {
   if (!p) return;
   if (p.theme && p.theme !== getTheme()) setTheme(p.theme);
   if ('accentColor' in p && (p.accentColor || '') !== getAccent()) {
@@ -2736,6 +2773,9 @@ fetch('/uiprefs.json').then(r => r.ok ? r.json() : null).then(p => {
   if (typeof p.updateCheck === 'boolean') {
     try { localStorage.setItem('updateCheckAuto', p.updateCheck ? '1' : '0'); } catch (e) {}
   }
+  if ((p.updateChannel === 'stable' || p.updateChannel === 'dev') && p.updateChannel !== getUpdateChannel()) {
+    storeUpdateChannel(p.updateChannel);
+  }
 }).catch(() => {});
 
 // Debounced (the colour picker fires per mouse-move) write-back to the ESP
@@ -2743,7 +2783,7 @@ let _uiPrefsTimer;
 function saveUiPrefsToDevice() {
   clearTimeout(_uiPrefsTimer);
   _uiPrefsTimer = setTimeout(() => {
-    const blob = new Blob([JSON.stringify({ theme: getTheme(), accentColor: getAccent() || '', dashMetrics: getDashMetrics(), updateCheck: getUpdateCheckAuto() })], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ theme: getTheme(), accentColor: getAccent() || '', dashMetrics: getDashMetrics(), updateCheck: getUpdateCheckAuto(), updateChannel: getUpdateChannel() })], { type: 'application/json' });
     const fd = new FormData();
     fd.append('updatefile', blob, 'uiprefs.json');
     fetch('/edit', { method: 'POST', body: fd }).catch(() => {});
@@ -2760,14 +2800,26 @@ function saveUiPrefsToDevice() {
 // it is strictly version-shaped — anything else is discarded before it can
 // reach storage or the DOM (which only ever renders it as escaped text).
 // Every failure path (offline, rate-limited, blocked, bad JSON) is silent.
+//
+// Two update channels (build.yml / scripts/release_version.py publish them):
+// Stable (default) = GitHub's latest release, which is never a pre-release;
+// Dev = the newest of ALL releases, pre-releases included — so a dev-channel
+// device still moves on to the stable release that follows its previews.
 
-const VERSION_TAG_RE = /^v\d+\.\d+(\.\d+)?$/;
+// Release tags: vX.Y, vX.Y.Z, and dev pre-releases vX.Y-dev.N
+const VERSION_TAG_RE = /^v\d+\.\d+(\.\d+)?(-dev\.[1-9]\d*)?$/;
+// Sort key [major, minor, patch, stable?1:0, devN, commitsSince]. Also reads
+// git describe forms (v4.23-12-gabc, v4.24-dev.3-2-gabc-dirty): a build N
+// commits past a tag sorts after that tag but before the next release, and a
+// stable release after its own dev previews:
+//   v4.23 < v4.23-12-gabc < v4.24-dev.1 < v4.24-dev.1-3-gabc < v4.24-dev.2 < v4.24
+// Anything else after vX.Y (e.g. the mock's v0.1-mock) counts as vX.Y itself.
 function parseVer(s) {
-  const m = /^v(\d+)\.(\d+)(?:\.(\d+))?/.exec(String(s || '').trim());
-  return m ? [+m[1], +m[2], +(m[3] || 0)] : null;
+  const m = /^v(\d+)\.(\d+)(?:\.(\d+))?(?:-dev\.(\d+))?(?:-(\d+)-g[0-9a-f]+)?/.exec(String(s || '').trim());
+  return m ? [+m[1], +m[2], +(m[3] || 0), m[4] == null ? 1 : 0, +(m[4] || 0), +(m[5] || 0)] : null;
 }
 function verNewer(a, b) { // a > b, component-wise
-  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i];
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] > b[i];
   return false;
 }
 function getUpdateCheckAuto() { try { return localStorage.getItem('updateCheckAuto') !== '0'; } catch (e) { return true; } }
@@ -2775,14 +2827,46 @@ function setUpdateCheckAuto(on) {
   try { localStorage.setItem('updateCheckAuto', on ? '1' : '0'); } catch (e) {}
   saveUiPrefsToDevice();
 }
+// 'stable' | 'dev'; the in-memory copy keeps a choice for this page load when
+// site data is blocked (localStorage throws)
+let _updateChannel = null;
+function getUpdateChannel() {
+  if (_updateChannel) return _updateChannel;
+  try { return localStorage.getItem('updateChannel') === 'dev' ? 'dev' : 'stable'; } catch (e) { return 'stable'; }
+}
+function storeUpdateChannel(ch) {
+  _updateChannel = ch === 'dev' ? 'dev' : 'stable';
+  try {
+    localStorage.setItem('updateChannel', _updateChannel);
+    localStorage.removeItem('updateCheck'); // that answer was for the other channel
+  } catch (e) {}
+}
+function setUpdateChannel(ch) {
+  storeUpdateChannel(ch);
+  saveUiPrefsToDevice();
+}
+
+// The newest version-shaped, published tag in a /releases list (dev channel)
+function newestReleaseTag(list) {
+  let best = null, bestKey = null;
+  for (const r of Array.isArray(list) ? list : []) {
+    const tag = r && !r.draft && r.tag_name;
+    if (!tag || !VERSION_TAG_RE.test(tag)) continue;
+    const k = parseVer(tag);
+    if (!best || verNewer(k, bestKey)) { best = tag; bestKey = k; }
+  }
+  return best;
+}
 
 async function checkLatestRelease(force) {
   const now = Date.now();
+  const channel = getUpdateChannel();
   let cache = null;
   try { cache = JSON.parse(localStorage.getItem('updateCheck') || 'null'); } catch (e) {}
   // Successful checks hold for a day; failures back off an hour, so a flaky
-  // connection can't turn every page load into an API request
-  if (!force && cache && typeof cache.checkedAt === 'number' &&
+  // connection can't turn every page load into an API request. A cached
+  // answer for the other channel is stale (older caches are stable-channel).
+  if (!force && cache && typeof cache.checkedAt === 'number' && (cache.channel || 'stable') === channel &&
       now - cache.checkedAt < (cache.ok ? 24 * 3600e3 : 3600e3)) {
     return (cache.ok && VERSION_TAG_RE.test(cache.tag || '')) ? cache.tag : null;
   }
@@ -2793,17 +2877,30 @@ async function checkLatestRelease(force) {
     if (m) {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 5000);
-      const r = await fetch('https://api.github.com/repos/' + m[1] + '/' + m[2] + '/releases/latest',
+      const r = await fetch('https://api.github.com/repos/' + m[1] + '/' + m[2] +
+        (channel === 'dev' ? '/releases?per_page=30' : '/releases/latest'),
         { signal: ctrl.signal, headers: { Accept: 'application/vnd.github+json' } });
       clearTimeout(t);
       if (r.ok) {
         const j = await r.json();
-        if (j && VERSION_TAG_RE.test(j.tag_name || '')) { tag = j.tag_name; ok = true; }
+        const found = channel === 'dev' ? newestReleaseTag(j) : (j && j.tag_name);
+        if (found && VERSION_TAG_RE.test(found)) { tag = found; ok = true; }
       }
     }
   } catch (e) { /* offline / CORS / rate-limited — stay silent */ }
-  try { localStorage.setItem('updateCheck', JSON.stringify({ tag, ok, checkedAt: now })); } catch (e) {}
+  try { localStorage.setItem('updateCheck', JSON.stringify({ tag, ok, channel, checkedAt: now })); } catch (e) {}
   return tag;
+}
+
+// Run the check and show (or clear) the navbar badge's release; a
+// per-version dismiss suppresses it until the next release comes out
+function refreshUpdateTag(dispatch, force) {
+  return checkLatestRelease(force).then(tag => {
+    let dismissed = null;
+    try { dismissed = localStorage.getItem('updateDismissedTag'); } catch (e) {}
+    if (tag && tag !== dismissed) dispatch({ type: 'SET_UPDATE_TAG', payload: tag });
+    else if (force) dispatch({ type: 'SET_UPDATE_TAG', payload: null });
+  }).catch(() => {});
 }
 
 // Keep-awake: stop the screen sleeping while the interface is open. Uses the
@@ -2916,7 +3013,9 @@ const Settings = () => {
       if (bundle.prefs && (bundle.prefs.theme || bundle.prefs.accentColor || bundle.prefs.dashMetrics)) {
         let dm = [];
         try { dm = JSON.parse(bundle.prefs.dashMetrics || '[]'); } catch (err) {}
-        await up('uiprefs.json', { theme: bundle.prefs.theme || 'system', accentColor: bundle.prefs.accentColor || '', dashMetrics: dm });
+        // the update settings aren't part of the bundle: keep this device's
+        await up('uiprefs.json', { theme: bundle.prefs.theme || 'system', accentColor: bundle.prefs.accentColor || '', dashMetrics: dm,
+          updateCheck: getUpdateCheckAuto(), updateChannel: getUpdateChannel() });
       }
       alert('Settings imported — reloading');
       location.reload();
@@ -5450,12 +5549,9 @@ const App = () => {
   // every failure; a per-version dismiss suppresses the badge until the next
   // release comes out.
   useEffect(() => {
-    if (!getUpdateCheckAuto()) return;
-    checkLatestRelease(false).then(tag => {
-      let dismissed = null;
-      try { dismissed = localStorage.getItem('updateDismissedTag'); } catch (e) {}
-      if (tag && tag !== dismissed) dispatch({ type: 'SET_UPDATE_TAG', payload: tag });
-    }).catch(() => {});
+    uiPrefsReady.then(() => {
+      if (getUpdateCheckAuto()) refreshUpdateTag(dispatch, false);
+    });
   }, []);
 
   // Unified data fetching — respects refreshRate setting

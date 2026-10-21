@@ -255,6 +255,9 @@ input:checked + .slider::before { transform: translateX(14px); }
 .toggle-row:has(input:checked) { border-color: var(--accent); color: var(--accent); background: var(--accent-glow); }
 .toggle-row.disabled { opacity: .45; pointer-events: none; }
 .toggle-row .toggle-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the same row holding a compact select instead of a switch */
+.toggle-row.select-row { cursor: default; }
+.toggle-row.select-row select { width: auto; margin: 0; padding: 3px 6px; font-size: .75rem; }
 
 /* navbar CAN node selector: full select on desktop, compact #N on slim rail */
 .can-node-select { position: relative; width: 100%; }
