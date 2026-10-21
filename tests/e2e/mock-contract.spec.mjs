@@ -1,5 +1,9 @@
 import { test, expect } from './fixtures.mjs';
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { ROUTES, PERM, cmdPerm, staticPerm, filePerm } from '../mock-esp/auth.mjs';
 
 // Contract tests for the mock ESP itself: the UI specs are only as good as
 // the mock's fidelity to the firmware (esp32-web-interface.ino). Each case
@@ -225,5 +229,54 @@ test.describe('Mock ESP contract: SSE stream (separate port)', () => {
     expect((await readSse(mock.ssePort, 'names=udc')).status).toBe(404);
     await mock.setSse('off');
     await expect(readSse(mock.ssePort, 'names=udc')).rejects.toThrow();
+  });
+});
+
+// The users/permissions model: the mock's tables must BE the firmware's.
+// ROUTES is read straight out of src/web_logic.h; the classification
+// vectors mirror test/test_web_auth (the firmware's native tests).
+test.describe('Mock ESP contract: permission model matches the firmware', () => {
+  const webLogic = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'web_logic.h'), 'utf8');
+
+  test('route table is identical to weblogic::ROUTES', () => {
+    const block = webLogic.slice(webLogic.indexOf('static const RouteRule ROUTES[]'), webLogic.indexOf('static const size_t ROUTE_COUNT'));
+    const bits = { M_GET: 1, M_POST: 2, M_PUT: 4, M_DELETE: 8, M_OTHER: 16, M_ANY: 31 };
+    const fw = [...block.matchAll(/\{\s*"([^"]+)",\s*([A-Z_| ]+?),\s*PERM_([A-Z]+)\s*\}/g)].map(m => [
+      m[1], m[2].split('|').map(s => bits[s.trim()]).reduce((a, b) => a | b, 0), PERM[m[3]],
+    ]);
+    expect(fw.length).toBeGreaterThan(30);
+    expect(ROUTES).toEqual(fw);
+  });
+
+  test('terminal command allowlist', () => {
+    for (const c of ['json', 'json hidden', 'errors', 'serial', 'help', 'get udc', 'get udc,tmphs,v_x', 'stream 10 udc,tmphs', 'stream 100 udc', 'can list', 'can print'])
+      expect(cmdPerm(c), c).toBe(PERM.READ);
+    for (const c of ['set fweak 50', 'save', 'load', 'defaults', 'start 2', 'stop', 'reset', 'fastuart', 'binarylogging 1',
+                     'can tx udc 0x100 0 16 1', 'can clear', 'can listx', 'get udc\nsave', 'get udc;save', 'get ', 'json  ',
+                     ' json', 'stream 0 udc', 'stream 101 udc', 'get é', ''])
+      expect(cmdPerm(c), JSON.stringify(c)).toBe(PERM.WRITE);
+  });
+
+  test('static and file classification', () => {
+    for (const p of ['/', '/app.js', '/app.js.gz', '/manifest.json', '/wifi.html']) expect(staticPerm(p), p).toBe(PERM.PUBLIC);
+    for (const p of ['/settings.json', '/presets.json', '/subscription.js', '/x.bin']) expect(staticPerm(p), p).toBe(PERM.READ);
+    for (const p of ['/../x', 'app.js', '/a\\b']) expect(staticPerm(p), p).toBe(PERM.DENY);
+    for (const p of ['favorites.json', 'subscription.js', '/x.bin']) expect(filePerm(p), p).toBe(PERM.WRITE);
+    for (const p of ['app.js', '/index.html', 'app.js.gz', 'settings.json', '/']) expect(filePerm(p), p).toBe(PERM.ADMIN);
+  });
+
+  test('auth replies: 401/403 JSON with the needed role; cookie attributes', async ({ mock }) => {
+    await mock.addUser('admin', 'admin-pass-1', 'admin');
+    await mock.addUser('vera', 'viewer-pass', 'viewer');
+    const r401 = await mock.call('/cmd?cmd=json');
+    expect(r401.status).toBe(401);
+    expect(JSON.parse(r401.text)).toEqual({ error: 'sign-in required' });
+    const s = await mock.signIn('vera', 'viewer-pass');
+    expect(s.setCookie).toMatch(/^oisess=[0-9a-f]{64}; Path=\/; HttpOnly; SameSite=Strict$/);
+    const r403 = await mock.call('/reboot', { cookie: s.cookie });
+    expect(JSON.parse(r403.text)).toEqual({ error: 'your account cannot do this', need: 'admin' });
+    const st = JSON.parse((await mock.call('/auth/state', { cookie: s.cookie })).text);
+    expect(st).toEqual({ enabled: true, user: 'vera', role: 'viewer', remember: false, password_min: 8 });
+    expect(JSON.parse((await mock.call('/auth/state')).text)).toEqual({ enabled: true, user: null, role: null, password_min: 8 });
   });
 });
