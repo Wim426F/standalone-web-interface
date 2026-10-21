@@ -51,14 +51,14 @@ test.describe('Mock ESP contract: /cmd (UART)', () => {
 
   test('get a,b&repeat=N returns N+1 sample groups, one value per line', async ({ mock }) => {
     const r = await get(mock.url + '/cmd?cmd=' + encodeURIComponent('get udc,tmphs') + '&repeat=3');
-    const vals = r.body.match(/[\-\d.]+/g);
+    const vals = r.body.match(/[-\d.]+/g);
     expect(vals).toHaveLength(8);
     expect(vals).toEqual(Array(4).fill(['398.50', '31.20']).flat());
   });
 
   test('repeat is clamped to 100 (101 groups)', async ({ mock }) => {
     const r = await get(mock.url + '/cmd?cmd=' + encodeURIComponent('get udc') + '&repeat=5000');
-    expect(r.body.match(/[\-\d.]+/g)).toHaveLength(101);
+    expect(r.body.match(/[-\d.]+/g)).toHaveLength(101);
   });
 
   test('commands are cut at the 128-char UART terminal buffer', async ({ mock }) => {

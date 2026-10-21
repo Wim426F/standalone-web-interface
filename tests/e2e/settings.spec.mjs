@@ -254,4 +254,35 @@ test.describe('Settings tab', () => {
     // ...and gauges.json on the device is untouched
     expect((await fetch(mock.url + '/gauges.json').then(r => r.json())).pages[0].name).toBe('Restored');
   });
+  test('WiFi station and AP settings post to /wifi', async ({ page, mock }) => {
+    await openApp(page, mock);
+    await gotoTab(page, 'Settings');
+    const ssid = page.locator('label', { hasText: 'Network SSID:' }).locator('input');
+    await expect(ssid).toHaveValue('mocknet'); // parsed from the templated wifi.html
+    await ssid.fill('garage');
+    await page.locator('label', { hasText: 'Passphrase:' }).nth(1).locator('input').fill('secret-pass');
+    await page.locator('button', { hasText: 'Save station settings' }).click();
+    await expect(page.locator('#settings')).toContainText('Station settings saved');
+    await expect.poll(async () => (await mock.state()).wifi.staSSID).toBe('garage');
+
+    const ap = page.locator('label', { hasText: /^SSID:/ }).locator('input');
+    await expect(ap).toHaveValue('inverter');
+    await ap.fill('inverter-2');
+    await page.locator('label', { hasText: 'Passphrase:' }).first().locator('input').fill('longenough');
+    await page.locator('button', { hasText: 'Save AP settings' }).click();
+    await expect.poll(async () => (await mock.state()).wifi.apSSID).toBe('inverter-2');
+  });
+
+  // APP BUG (data/app.js saveWiFi, ~line 3059): the reply status is never
+  // checked. The firmware's handleWifi answers 400 "AP update failed —
+  // password must be 8+ characters" for a 1-7 char passphrase, but the UI
+  // still shows "AP settings saved" while the old credentials stay active.
+  test.fixme('a too-short AP passphrase reports the device rejection', async ({ page, mock }) => {
+    await openApp(page, mock);
+    await gotoTab(page, 'Settings');
+    await page.locator('label', { hasText: 'Passphrase:' }).first().locator('input').fill('short');
+    await page.locator('button', { hasText: 'Save AP settings' }).click();
+    await expect(page.locator('#settings')).toContainText(/failed|8\+ characters/i);
+    await expect(page.locator('#settings')).not.toContainText('AP settings saved');
+  });
 });

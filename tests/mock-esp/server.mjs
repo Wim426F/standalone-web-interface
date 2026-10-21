@@ -107,6 +107,7 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
   let otainfo = { version: 'v0.1-mock', repo: 'https://github.com/wjcloudy/esp32-web-interface', target: 'esp32' };
   let uartPages = 4; // pages reported for the UART-mode fwupdate flow
   let fwSteps = []; // every step passed to /fwupdate, in order
+  let wifi = { apSSID: 'inverter', staSSID: 'mocknet' }; // what WiFi.softAPSSID()/SSID() report
   let sseMode = 'on';
   let sseRes = null; // the one live stream (firmware: newest stream wins)
 
@@ -351,10 +352,10 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
 
       // --- test introspection ---
       if (p === '/__test/commands') return json(commandLog);
-      if (p === '/__test/state') return json({ inverter, files: [...files.keys()], settings, canNodes, canMap, commandLog, fwSteps });
+      if (p === '/__test/state') return json({ inverter, files: [...files.keys()], settings, canNodes, canMap, commandLog, fwSteps, wifi, sseOpen: sseRes !== null });
       if (p === '/__test/reset') {
         inverter = freshInverterState(); files = new Map(); commandLog = []; fwSteps = [];
-        settings = freshSettings(); canNodes = null; canMap = []; canCacheLoaded = true; sseMode = 'on';
+        settings = freshSettings(); canNodes = null; wifi = { apSSID: 'inverter', staSSID: 'mocknet' }; canMap = []; canCacheLoaded = true; sseMode = 'on';
         fwStatus = { state: 0 };
         return text('reset');
       }
@@ -500,11 +501,15 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
           const pw = q.get('apPW');
           if (pw.length > 0 && pw.length < 8)
             return send(400, 'AP update failed — password must be 8+ characters (or empty for an open AP)', 'text/html');
+          wifi.apSSID = q.get('apSSID');
           return text(dataFileText('wifi-updated.html'), 'text/html');
         }
-        if (q.has('staSSID') && q.has('staPW')) return text(dataFileText('wifi-updated.html'), 'text/html');
+        if (q.has('staSSID') && q.has('staPW')) {
+          wifi.staSSID = q.get('staSSID');
+          return text(dataFileText('wifi-updated.html'), 'text/html');
+        }
         const html = dataFileText('wifi.html')
-          .replaceAll('%staSSID%', 'mocknet').replaceAll('%apSSID%', 'inverter')
+          .replaceAll('%staSSID%', wifi.staSSID).replaceAll('%apSSID%', wifi.apSSID)
           .replaceAll('%staIP%', '192.168.1.42');
         return text(html, 'text/html');
       }
