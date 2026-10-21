@@ -31,10 +31,14 @@ const BANNER_CSS = `
 export function buildDemoSite(out = path.join(ROOT, '_site')) {
   fs.rmSync(out, { recursive: true, force: true });
   fs.mkdirSync(out, { recursive: true });
-  const names = fs.readdirSync(DATA);
-  for (const name of names) {
+  // Directory entries carry their type, so there's no separate stat call
+  // that the file could change after
+  const entries = fs.readdirSync(DATA, { withFileTypes: true });
+  const names = entries.map(e => e.name);
+  for (const entry of entries) {
+    const name = entry.name;
     const src = path.join(DATA, name);
-    if (!fs.statSync(src).isFile() || SKIP.has(name)) continue;
+    if (!entry.isFile() || SKIP.has(name)) continue;
     if (name.endsWith('.gz')) {
       // gz-only assets (vendored libraries) are served unpacked; the rest
       // are copies of a source file that is copied as-is

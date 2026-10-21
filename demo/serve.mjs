@@ -20,10 +20,20 @@ export function serveStatic(dir, { port = 0, base = '/' } = {}) {
     if (!p.startsWith(base)) { res.writeHead(404); res.end('not found'); return; }
     const rel = p.slice(base.length) || 'index.html';
     const abs = path.resolve(root, rel);
-    if (!abs.startsWith(root + path.sep) || !fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
+    if (!abs.startsWith(root + path.sep)) { res.writeHead(404); res.end('not found'); return; }
+    // Open once and check/read through the same descriptor, so the file
+    // can't be swapped between the check and the read
+    let buf;
+    let fd;
+    try {
+      fd = fs.openSync(abs, 'r');
+      if (!fs.fstatSync(fd).isFile()) throw new Error('not a file');
+      buf = fs.readFileSync(fd);
+    } catch {
       res.writeHead(404); res.end('not found'); return;
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
     }
-    const buf = fs.readFileSync(abs);
     res.writeHead(200, { 'Content-Type': MIME[path.extname(abs)] || 'application/octet-stream', 'Content-Length': buf.length });
     res.end(buf);
   });

@@ -41,7 +41,8 @@ const SHOT_CSS = `#oi-demo-banner{display:none!important}
 ::-webkit-scrollbar{display:none}`;
 
 fs.mkdirSync(OUT, { recursive: true });
-const site = buildDemoSite(path.join(os.tmpdir(), 'oi-demo-screenshots'));
+// A fresh private directory each run, never a fixed name in the shared temp dir
+const site = buildDemoSite(fs.mkdtempSync(path.join(os.tmpdir(), 'oi-demo-screenshots-')));
 const server = await serveStatic(site, { base: '/esp32-web-interface/' });
 const browser = await chromium.launch();
 const missed = [];
