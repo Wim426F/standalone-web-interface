@@ -1,11 +1,17 @@
 name: Build combined images
 
-# dev / PRs: build the images as workflow artifacts (versioned
-# vX.Y-N-gSHA by git describe), no release.
-# Push to main: run the full test suite first, then bump to the next
-# vMAJOR.MINOR tag, build, and publish a GitHub release with the images.
+# Two release channels (the web UI's Update tab picks one):
+# - Push to main (stable): run the full test suite first, then take the next
+#   vMAJOR.MINOR (minor + 1 of the newest stable tag), build, and publish a
+#   GitHub release marked Latest.
+# - Push to dev (dev): run the full test suite first, then publish a
+#   pre-release vMAJOR.MINOR-dev.N previewing the next stable version (never
+#   marked Latest), and delete all but the newest 5 dev release pages (their
+#   tags stay). See scripts/release_version.py for the numbering.
+# PRs: build the images as workflow artifacts (versioned by git describe).
 # Put "[skip release]" in the head commit message to build without releasing.
-# Pushing a v* tag by hand still releases that exact tag.
+# Pushing a v* tag by hand still releases that exact tag (a pre-release if
+# the tag has a suffix, e.g. v4.24-dev.3).
 on:
   push:
     branches: [main, dev]
@@ -17,23 +23,25 @@ on:
 permissions:
   contents: write
 
-# Releases on main run one at a time, so two quick pushes can't both claim
-# the same version number
+# Releases run one at a time per branch, so two quick pushes can't both
+# claim the same version number, and a newer push never cancels a release
+# halfway through publishing (it waits; pushes queued behind it collapse
+# into the newest)
 concurrency:
   group: build-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/dev' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   tests:
-    # dev pushes and PRs already run tests.yml on their own
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # PRs run tests.yml on their own; branch pushes are gated here
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
     uses: ./.github/workflows/tests.yml
     permissions:
       contents: read
 
   build:
     needs: tests
-    # tests is skipped off main; any failure there blocks the release
+    # tests is skipped for PRs/tags; any failure there blocks the release
     if: ${{ !cancelled() && (needs.tests.result == 'success' || needs.tests.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
@@ -46,28 +54,36 @@ jobs:
           HEAD_MSG: ${{ github.event.head_commit.message }}
         run: |
           RELEASE=false
+          CHANNEL=none
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VER="${GITHUB_REF#refs/tags/}"
             RELEASE=true
-          elif [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main && "$HEAD_MSG" != *"[skip release]"* ]]; then
-            VER=$(git tag --points-at HEAD --list 'v*' --sort=-v:refname | head -n1)
-            if [ -z "$VER" ]; then
-              LAST=$(git tag --list 'v*' --sort=-v:refname | head -n1)
-              [ -n "$LAST" ] || LAST=v0.0
-              MAJOR=$(echo "${LAST#v}" | cut -d. -f1)
-              MINOR=$(echo "${LAST#v}" | cut -d. -f2 | grep -o '^[0-9]*')
-              VER="v${MAJOR}.$((MINOR + 1))"
-              # Local tag only, so version.py's git describe bakes VER into
-              # the firmware/UI; the release step creates it on GitHub
-              git tag "$VER"
-            fi
+          elif [[ "$GITHUB_EVENT_NAME" == push && "$HEAD_MSG" != *"[skip release]"* && "$GITHUB_REF" == refs/heads/main ]]; then
+            # Stable tags only: dev pre-release tags never bump the version
+            VER=$(python3 scripts/release_version.py stable)
             RELEASE=true
+          elif [[ "$GITHUB_EVENT_NAME" == push && "$HEAD_MSG" != *"[skip release]"* && "$GITHUB_REF" == refs/heads/dev ]]; then
+            # Empty when HEAD is already a stable release (main merged back)
+            VER=$(python3 scripts/release_version.py dev)
+            [ -n "$VER" ] && RELEASE=true
+          fi
+          if [ "$RELEASE" = true ]; then
+            if [[ "$VER" == *-* ]]; then CHANNEL=dev; else CHANNEL=stable; fi
+            PREV=$(python3 scripts/release_version.py previous "$VER")
+            # The exact version goes into the firmware/UI (version.py); the
+            # release step creates the tag on GitHub
+            echo "WEB_VERSION_OVERRIDE=$VER" >> "$GITHUB_ENV"
           else
             VER=$(git describe --tags --always)
+            PREV=
           fi
-          echo "VER=$VER" >> "$GITHUB_ENV"
-          echo "RELEASE=$RELEASE" >> "$GITHUB_ENV"
-          echo "Version: $VER (release: $RELEASE)"
+          {
+            echo "VER=$VER"
+            echo "RELEASE=$RELEASE"
+            echo "CHANNEL=$CHANNEL"
+            echo "PREV=$PREV"
+          } >> "$GITHUB_ENV"
+          echo "Version: $VER (release: $RELEASE, channel: $CHANNEL, notes since: ${PREV:-start})"
 
       - uses: actions/setup-python@v6
         with:
@@ -177,7 +193,11 @@ jobs:
           retention-days: 30
 
       # Creates the tag (at this commit) and the release if they don't exist
-      # yet; a GITHUB_TOKEN-created tag doesn't re-trigger this workflow
+      # yet; a GITHUB_TOKEN-created tag doesn't re-trigger this workflow.
+      # Dev releases are pre-releases and never Latest, so /releases/latest
+      # (the UI's stable-channel check) only ever sees stable releases.
+      # Notes start at the previous stable release for a stable one (covering
+      # all its dev previews), at the previous release of either kind for dev.
       - name: Publish release
         if: env.RELEASE == 'true'
         # Third-party action with write access: pinned to a commit, not a
@@ -186,11 +206,32 @@ jobs:
         with:
           tag_name: ${{ env.VER }}
           target_commitish: ${{ github.sha }}
-          name: ${{ env.VER }}
+          name: ${{ env.CHANNEL == 'dev' && format('{0} (dev)', env.VER) || env.VER }}
+          prerelease: ${{ env.CHANNEL == 'dev' }}
+          make_latest: ${{ env.CHANNEL == 'dev' && 'false' || 'true' }}
           generate_release_notes: true
-          make_latest: true
+          previous_tag: ${{ env.PREV }}
           files: |
             esp32_${{ env.VER }}-0x000.bin
             esp32s3_${{ env.VER }}-0x000.bin
             esp32_${{ env.VER }}-ota.bin
             esp32s3_${{ env.VER }}-ota.bin
+
+      # Keep the releases page short: all but the newest 5 dev pre-release
+      # pages go. Only the release pages: their tags stay (dev numbering
+      # counts them, and any build can still be checked out). Stable
+      # releases are never touched. Never fails the release.
+      - name: Prune old dev pre-releases
+        if: env.RELEASE == 'true' && env.CHANNEL == 'dev'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isPrerelease,isDraft \
+            | python3 scripts/release_version.py prune --keep "$VER" > prune.txt
+          echo "Removing $(wc -l < prune.txt) old dev release page(s)"
+          while read -r tag; do
+            [ -n "$tag" ] || continue
+            # no --cleanup-tag: the tag stays
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes
+          done < prune.txt

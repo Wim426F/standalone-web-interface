@@ -1,16 +1,27 @@
 # Injects the git-derived version (tag, or tag-distance-sha) as WEB_VERSION
 # so firmware, UI and release artifacts all report the same version.
+#
+# A release build sets WEB_VERSION_OVERRIDE to the exact version it publishes
+# (build.yml): a commit can carry several tags (a dev pre-release's and, after
+# a fast-forward merge, the stable release's), and git describe could pick
+# either one.
+import os
+import re
 import subprocess
 
 Import("env")
 
-try:
-    ver = subprocess.check_output(
-        ["git", "describe", "--tags", "--always", "--dirty"],
-        text=True, stderr=subprocess.DEVNULL
-    ).strip()
-except Exception:
-    ver = "unknown"
+ver = os.environ.get("WEB_VERSION_OVERRIDE", "").strip()
+if ver and not re.fullmatch(r"[\w.+-]{1,40}", ver):
+    raise SystemExit("WEB_VERSION_OVERRIDE is not version-shaped: %r" % ver)
+if not ver:
+    try:
+        ver = subprocess.check_output(
+            ["git", "describe", "--tags", "--always", "--dirty"],
+            text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except Exception:
+        ver = "unknown"
 
 env.Append(CPPDEFINES=[("WEB_VERSION", env.StringifyMacro(ver))])
 

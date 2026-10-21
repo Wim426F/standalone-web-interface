@@ -5,12 +5,11 @@ name: Tests
 # against the mock ESP, and a compile of every PlatformIO environment plus
 # the SPIFFS image. Release images are built by build.yml.
 #
-# Branch flow: work lands on dev (pushes run this directly), dev → main by
-# PR (runs this as the required checks). A push to main runs this again via
-# build.yml's workflow_call, and only a green run there cuts a release.
+# Branch flow: work lands on dev, dev → main by PR (runs this as the
+# required checks). Pushes to dev and main run this via build.yml's
+# workflow_call, and only a green run there cuts a release (a dev
+# pre-release or a stable one) — so there is no push trigger here.
 on:
-  push:
-    branches: [dev]
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -47,6 +46,10 @@ jobs:
 
       - name: data/*.gz in sync with sources
         run: npm run check:gz
+
+      # Release numbering for the stable/dev channels (build.yml)
+      - name: Release version script tests
+        run: python3 -m unittest discover -s scripts -p "test_*.py" -v
 
       # Tooling only (nothing from node_modules ships to the ESP), but a
       # compromised dev dependency still runs in CI and on contributors' PCs
