@@ -65,6 +65,20 @@ export default [
     rules: { ...js.configs.recommended.rules },
   },
   {
+    // Remote support bridge: a classic script whose `inverter` global is
+    // called by openinverter.org's support script on remote.html
+    files: ['data/inverter.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: { fetch: 'readonly' },
+    },
+    rules: {
+      ...js.configs.recommended.rules,
+      'no-unused-vars': ['error', { varsIgnorePattern: '^inverter$' }],
+    },
+  },
+  {
     // Live demo transport + data: plain browser scripts loaded before app.js
     files: ['demo/*.js'],
     languageOptions: {
