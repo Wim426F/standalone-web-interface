@@ -8,6 +8,9 @@
     "check:gz": "python gzip_assets.py --check",
     "mock": "node tests/mock-esp/server.mjs",
     "test:e2e": "playwright test",
+    "demo": "node demo/serve.mjs",
+    "demo:build": "node demo/build.mjs",
+    "screenshots": "node tests/screenshots/capture.mjs",
     "test": "npm run lint && npm run check:gz && npm run test:e2e"
   },
   "devDependencies": {
