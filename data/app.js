@@ -2087,6 +2087,11 @@ const PlotChart = ({ plot, queueRef, sampleTick, maxValues }) => {
         }
       });
     }
+    // Pin the x window to maxValues samples — auto-ranging made the axis
+    // limits jump back and forth on every update once the buffer was full
+    const xMax = Math.max(maxValues - 1, timeRef.current - 1);
+    chart.options.scales.x.min = xMax - (maxValues - 1);
+    chart.options.scales.x.max = xMax;
     chart.update('none');
   }, [sampleTick]);
 
@@ -2194,7 +2199,7 @@ const Plot = () => {
 
     fetchRef.current = setTimeout(loop, 0);
     return () => { running = false; if (fetchRef.current) clearTimeout(fetchRef.current); };
-  }, [plotting, plots]);
+  }, [plotting, plots, burstLength]); // burstLength: a Burst change while plotting used to be ignored
 
 
   const addPlot = () => {
@@ -2948,6 +2953,7 @@ const Settings = () => {
   const [wifiMsg, setWifiMsg] = useState('');
   const [wifiStatus, setWifiStatus] = useState(null); // live /wifi-status (rssi etc.)
   const [apFb, setApFb] = useState(false); // AP broadcasts only as fallback
+  const [sdInfo, setSdInfo] = useState(null); // { available, enabled, card } from /settings
   const [devName, setDevName] = useState(''); // friendly device nickname
   const [devMsg, setDevMsg] = useState('');
   const saveDevName = async () => {
@@ -3006,6 +3012,9 @@ const Settings = () => {
           if (data.uart_rx_pin != null) setUartRxPin(data.uart_rx_pin);
           if (data.uart_tx_pin != null) setUartTxPin(data.uart_tx_pin);
           setApFb(data.ap_fallback === true);
+          // Older firmware doesn't report SD state — keep the box hidden
+          if (data.sd_available !== undefined)
+            setSdInfo({ available: data.sd_available === true, enabled: data.sd_enabled !== false, card: data.sd_card === true });
           if (typeof data.dev_name === 'string') setDevName(data.dev_name);
           setCanMode(data.can_mode === true);
           if (data.can_node_id) setCanNodeId(data.can_node_id);
@@ -3307,6 +3316,20 @@ const Settings = () => {
           ${devMsg && html`<p id="dev-name-msg" style="color:var(--accent);font-size:.78rem;font-weight:600;margin:.5rem 0 0">${devMsg}</p>`}
           <p style="font-size:.72rem;color:var(--text3);margin:.35rem 0 0;max-width:350px">The hostname (<b>${(devName.trim().toLowerCase().replace(/[^a-z0-9 _-]/g, '').replace(/[ _]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'inverter')}.local</b>) applies after the next reboot.</p>
         </div>
+
+        ${sdInfo && sdInfo.available && html`
+        <div class="dash-box compact">
+          <h3>SD Card</h3>
+          <div style="max-width:350px">
+            <${ToggleRow} label="Probe for an SD card at boot" checked=${sdInfo.enabled}
+              onChange=${v => { setSdInfo({ ...sdInfo, enabled: v }); fetch('/settings?sd_enabled=' + (v ? '1' : '0'), { method: 'POST' }).catch(() => {}); }} />
+          </div>
+          <p style="font-size:.72rem;color:var(--text3);margin:.35rem 0 0;max-width:350px">
+            Turn off on boards with no SD slot wired to the SDIO pins (e.g. Wemos D1 Mini ESP32)
+            if they fail to boot. Applies after the next reboot.
+            <b>${sdInfo.card ? 'Card detected.' : 'No card detected.'}</b>
+          </p>
+        </div>`}
 
         `}
         ${subTab === 'web' && html`

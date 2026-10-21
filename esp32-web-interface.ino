@@ -61,11 +61,27 @@
 #ifndef ENABLE_SDCARD
 #define ENABLE_SDCARD 1
 #endif
+#if ENABLE_SDCARD && !defined(S3_SKIP_SD_MMC)
+#define SD_AVAILABLE 1
+#else
+#define SD_AVAILABLE 0
+#endif
+// Factory default for the runtime "sd_enabled" setting (boards without an
+// SD slot can be built with -D SD_DEFAULT_ENABLED=0; users can toggle it)
+#ifndef SD_DEFAULT_ENABLED
+#define SD_DEFAULT_ENABLED 1
+#endif
 
 #define INVERTER_PORT UART_NUM_0
 #define INVERTER_RX 1 //3 - Swapped for Wemos board onto Zombie and other OI boards
 #define INVERTER_TX 3 //1 - Swapped for Wemos board onto Zombie and other OI boards
 #define UART_TIMEOUT (100 / portTICK_PERIOD_MS)
+// Silence that ends a reply once bytes have started arriving. uart_read_bytes
+// waits the full timeout unless the buffer fills, so using UART_TIMEOUT here
+// cost 100 ms per reply — and per sample with get&repeat (Burst 10 ≈ 1 s)
+#ifndef UART_IDLE_TIMEOUT
+#define UART_IDLE_TIMEOUT pdMS_TO_TICKS(10)
+#endif
 #define UART_MESSBUF_SIZE 100
 #define CAN_NODE_ID_MIN 1
 #define CAN_NODE_ID_MAX 127
@@ -445,7 +461,9 @@ Ticker sta_tick;
 RTC_PCF8523 ext_rtc;
 ESP32Time int_rtc;
 bool haveRTC = false;
-bool haveSDCard = false;
+volatile bool haveSDCard = false; // also set late by the sdinit task
+bool sdEnabled = SD_DEFAULT_ENABLED; // runtime setting, applied at boot
+volatile bool sdInitDone = false;
 bool fastLoggingEnabled = true;
 bool fastLoggingActive = false;
 uint8_t SDIObuffer[SDIO_BUFFER_SIZE];
@@ -833,6 +851,9 @@ void handleFileDelete(){
   if(server.args() == 0) return server.send(500, "text/plain", "BAD ARGS");
   String path = server.arg(0);
   //DBG_OUTPUT_PORT.println("handleFileDelete: " + path);
+  // The UI sends bare names (/edit?f=subscription.js) but SPIFFS paths are
+  // rooted — without this every delete 404'd
+  if(!path.startsWith("/")) path = "/" + path;
   if(path == "/")
     return server.send(500, "text/plain", "BAD PATH");
   if(!SPIFFS.exists(path))
@@ -847,6 +868,7 @@ void handleFileCreate(){
     return server.send(500, "text/plain", "BAD ARGS");
   String path = server.arg(0);
   //DBG_OUTPUT_PORT.println("handleFileCreate: " + path);
+  if(!path.startsWith("/")) path = "/" + path; // same as handleFileDelete
   if(path == "/")
     return server.send(500, "text/plain", "BAD PATH");
   if(SPIFFS.exists(path))
@@ -991,6 +1013,17 @@ void uart_readUntill(char val)
     retVal = uart_read_bytes(INVERTER_PORT, uartMessBuff, 1, UART_TIMEOUT);
   }
   while((retVal>0) && (uartMessBuff[0] != val));
+}
+
+// Read one chunk of a reply: wait up to firstByteTimeout for it to start,
+// then take whatever follows until the line goes quiet for UART_IDLE_TIMEOUT.
+// Keeps the generous wait for a slow first byte without paying it at the end
+static int uartReadChunk(char* buf, size_t size, TickType_t firstByteTimeout)
+{
+  int n = uart_read_bytes(INVERTER_PORT, buf, 1, firstByteTimeout);
+  if (n <= 0 || size <= 1) return n;
+  int m = uart_read_bytes(INVERTER_PORT, buf + 1, size - 1, UART_IDLE_TIMEOUT);
+  return m > 0 ? n + m : n;
 }
 
 // Terminate any partial line sitting in the inverter's terminal buffer
@@ -1163,16 +1196,21 @@ static void handleCommand() {
 
   sendCommand(cmd);
   int rpt = repeat;
+  // Full timeout only while waiting for a reply (or repetition) to start;
+  // once it's flowing, a short silence means it's done
+  TickType_t wait = UART_TIMEOUT;
   do {
     memset(buffer,0,sizeof(buffer));
-    len = uart_read_bytes(INVERTER_PORT, buffer, sizeof(buffer), UART_TIMEOUT);
+    len = uartReadChunk(buffer, sizeof(buffer), wait);
     if(len > 0) output.concat(buffer, len);
+    wait = UART_IDLE_TIMEOUT;
 
     if (rpt)
     {
       rpt--;
       uart_write_bytes(INVERTER_PORT, "!", 1); //trigger next repetition
       uart_read_bytes(INVERTER_PORT, buffer, 1, UART_TIMEOUT); //consume "!"
+      wait = UART_TIMEOUT;
     }
   } while (len > 0);
 
@@ -1187,15 +1225,18 @@ static void handleCommand() {
     uartResync();
     sendCommand(cmd);
     rpt = repeat;
+    wait = UART_TIMEOUT;
     do {
       memset(buffer,0,sizeof(buffer));
-      len = uart_read_bytes(INVERTER_PORT, buffer, sizeof(buffer), UART_TIMEOUT);
+      len = uartReadChunk(buffer, sizeof(buffer), wait);
       if(len > 0) output.concat(buffer, len);
+      wait = UART_IDLE_TIMEOUT;
       if (rpt)
       {
         rpt--;
         uart_write_bytes(INVERTER_PORT, "!", 1);
         uart_read_bytes(INVERTER_PORT, buffer, 1, UART_TIMEOUT);
+        wait = UART_TIMEOUT;
       }
     } while (len > 0);
   }
@@ -1206,7 +1247,11 @@ static void handleCommand() {
   if (!fastUart && !fastUartAvailable && output.length() > 0 && fastUartAttempts < 3)
     fastUartAvailable = true;
 
+#ifdef DEBUG
+  // Debug builds only: at 115200 baud a ~30 KB json reply blocks loop() for
+  // ~2.6 s here, stalling the web server and the SSE stream with it
   DBG_OUTPUT_PORT.println(output);
+#endif
   server.sendHeader("Access-Control-Allow-Origin","*");
   server.send(200, "text/json", output);
 }
@@ -2030,11 +2075,12 @@ static void saveSettings(const String& canNodesJson)
 {
   File f = SPIFFS.open("/settings.json", "w");
   if (f) {
-    f.printf("{\"dev_name\":\"%s\",\"txrx_swapped\":%s,\"uart_rx_pin\":%d,\"uart_tx_pin\":%d,\"ap_fallback\":%s,\"can_mode\":%s,\"can_node_id\":%d,\"can_speed\":%d,\"can_rx_pin\":%d,\"can_tx_pin\":%d,\"can_pwr_pin\":%d,\"can_pwr_inv\":%s,\"can_en_pin\":%d,\"can_en_inv\":%s,\"can_nodes\":%s}",
+    f.printf("{\"dev_name\":\"%s\",\"txrx_swapped\":%s,\"uart_rx_pin\":%d,\"uart_tx_pin\":%d,\"ap_fallback\":%s,\"sd_enabled\":%s,\"can_mode\":%s,\"can_node_id\":%d,\"can_speed\":%d,\"can_rx_pin\":%d,\"can_tx_pin\":%d,\"can_pwr_pin\":%d,\"can_pwr_inv\":%s,\"can_en_pin\":%d,\"can_en_inv\":%s,\"can_nodes\":%s}",
              jsonEscape(deviceName).c_str(),
              txrxSwapped ? "true" : "false",
              uartRxPin, uartTxPin,
              apFallback ? "true" : "false",
+             sdEnabled ? "true" : "false",
              canMode ? "true" : "false",
              canNodeId, canSpeed, canRxPin, canTxPin,
              canPwrPin, canPwrInv ? "true" : "false",
@@ -2068,6 +2114,9 @@ static void loadSettings()
       }
 
       apFallback = json.indexOf("\"ap_fallback\":true") >= 0;
+      // Absent in older files → keep the build's default
+      if (json.indexOf("\"sd_enabled\":false") >= 0) sdEnabled = false;
+      else if (json.indexOf("\"sd_enabled\":true") >= 0) sdEnabled = true;
 
       // dev_name is a quoted string — read to the closing quote, honouring escapes
       int dn = json.indexOf("\"dev_name\":\"");
@@ -2147,6 +2196,11 @@ static void handleSettings()
     if (!apFallback && WiFi.getMode() != WIFI_AP_STA && WiFi.getMode() != WIFI_AP)
       WiFi.mode(WIFI_AP_STA);
     server.send(200, "text/json", "{\"result\":\"ok\"}");
+  } else if (server.hasArg("sd_enabled")) {
+    sdEnabled = (server.arg("sd_enabled") == "1");
+    saveSettings();
+    // SD is probed once at boot, so this takes effect after a reboot
+    server.send(200, "text/json", "{\"result\":\"ok\"}");
   } else if (server.hasArg("can_mode")) {
     if (canFwBusy()) { server.send(409, "text/json", "{\"error\":\"CAN firmware update in progress\"}"); return; }
     canMode = (server.arg("can_mode") == "1");
@@ -2203,6 +2257,12 @@ static void handleSettings()
     json += uartTxPin;
     json += ",\"ap_fallback\":";
     json += apFallback ? "true" : "false";
+    json += ",\"sd_available\":";
+    json += SD_AVAILABLE ? "true" : "false";
+    json += ",\"sd_enabled\":";
+    json += sdEnabled ? "true" : "false";
+    json += ",\"sd_card\":";
+    json += haveSDCard ? "true" : "false";
     json += ",\"can_mode\":";
     json += canMode ? "true" : "false";
     json += ",\"can_node_id\":";
@@ -2395,10 +2455,12 @@ static void sseTick()
   char buffer[255];
   int len;
   String out;
+  TickType_t wait = UART_TIMEOUT;
   do {
     memset(buffer, 0, sizeof(buffer));
-    len = uart_read_bytes(INVERTER_PORT, buffer, sizeof(buffer), UART_TIMEOUT);
+    len = uartReadChunk(buffer, sizeof(buffer), wait);
     if (len > 0) out.concat(buffer, len);
+    wait = UART_IDLE_TIMEOUT;
   } while (len > 0);
   if (out.length() == 0) return; // silent inverter — skip the frame, keep the stream
   out.replace('\r', ' ');
@@ -2438,32 +2500,34 @@ void setup(void){
   else
     DBG_OUTPUT_PORT.println("No RTC found, defaulting to sequential file names"); 
 
-#if ENABLE_SDCARD && !defined(S3_SKIP_SD_MMC)
+#if SD_AVAILABLE
   //initialise SD card in SDIO mode with timeout (SD_MMC.begin blocks without card)
-  {
-    TaskHandle_t sdTask = NULL;
-    bool sdDone = false;
-    xTaskCreate([](void* param) {
-      bool* done = (bool*)param;
-      if (SD_MMC.begin("/sdcard", true, false, 40000, 5U)) {
-        *done = true;
-      }
+  if (sdEnabled) {
+    // The task owns its own lifetime: it is never deleted from here. Killing
+    // it on timeout (old behaviour) either tore it down inside the SDMMC
+    // driver or, if it had already exited, deleted a stale handle — both
+    // hung boards with no card fitted (issue #5). Flags are globals because
+    // the task can outlive setup()'s stack frame.
+    xTaskCreate([](void*) {
+      if (SD_MMC.begin("/sdcard", true, false, 40000, 5U))
+        haveSDCard = true;
+      sdInitDone = true;
       vTaskDelete(NULL);
-    }, "sdinit", 4096, &sdDone, 1, &sdTask);
-    
-    // Wait up to 1 second for SD card init
-    for (int i = 0; i < 10 && !sdDone; i++) {
+    }, "sdinit", 4096, NULL, 1, NULL);
+
+    // Wait up to 1 second; a slow card that comes up later still sets haveSDCard
+    for (int i = 0; i < 10 && !sdInitDone; i++) {
       delay(100);
     }
-    if (sdTask) vTaskDelete(sdTask);
-    
-    if (sdDone) {
-      haveSDCard = true;
+
+    if (haveSDCard)
       DBG_OUTPUT_PORT.println("Started SD_MMC");
-    } else {
-      haveSDCard = false;
-      DBG_OUTPUT_PORT.println("SD_MMC timed out or no card");
-    }
+    else if (sdInitDone)
+      DBG_OUTPUT_PORT.println("SD_MMC: no card");
+    else
+      DBG_OUTPUT_PORT.println("SD_MMC still probing, continuing boot");
+  } else {
+    DBG_OUTPUT_PORT.println("SD_MMC disabled in settings");
   }
 #else
   haveSDCard = false;
