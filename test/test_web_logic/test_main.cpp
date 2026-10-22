@@ -378,6 +378,42 @@ void test_fuzz_readReply_terminates_and_bounds_output()
   }
 }
 
+// ---- config kept across OTA -----------------------------------------------
+
+void test_cfgNvsKey_only_for_mirrored_files()
+{
+  TEST_ASSERT_EQUAL_STRING("settings", cfgNvsKey("/settings.json"));
+  TEST_ASSERT_EQUAL_STRING("settings", cfgNvsKey("settings.json"));   // upload names have no '/'
+  TEST_ASSERT_EQUAL_STRING("uiprefs", cfgNvsKey("/uiprefs.json"));
+  TEST_ASSERT_NULL(cfgNvsKey("/gauges.json"));                         // layouts: too big, UI handles them
+  TEST_ASSERT_NULL(cfgNvsKey("/settings.json.bak"));
+  TEST_ASSERT_NULL(cfgNvsKey("//settings.json"));
+  TEST_ASSERT_NULL(cfgNvsKey(""));
+  TEST_ASSERT_NULL(cfgNvsKey(nullptr));
+  for (const CfgMirrorFile& f : CFG_MIRRORED) TEST_ASSERT_TRUE(strlen(f.nvsKey) <= 15); // NVS key limit
+}
+
+void test_cfgSyncAction_restores_what_an_update_erased()
+{
+  // After OTA: file gone, copy in NVS -> write it back
+  TEST_ASSERT_EQUAL_INT(CFG_SYNC_RESTORE_FILE, cfgSyncAction(false, 0, true, false));
+  // Never saved anywhere -> nothing to do (defaults apply)
+  TEST_ASSERT_EQUAL_INT(CFG_SYNC_NONE, cfgSyncAction(false, 0, false, false));
+}
+
+void test_cfgSyncAction_file_wins_when_present()
+{
+  // First boot on this firmware (settings from older firmware) or a backup
+  // restored through the Files tab -> it becomes the kept copy
+  TEST_ASSERT_EQUAL_INT(CFG_SYNC_SAVE_TO_NVS, cfgSyncAction(true, 200, false, false));
+  TEST_ASSERT_EQUAL_INT(CFG_SYNC_SAVE_TO_NVS, cfgSyncAction(true, 200, true, false));
+  TEST_ASSERT_EQUAL_INT(CFG_SYNC_NONE, cfgSyncAction(true, 200, true, true));
+  // Empty or oversized files are never mirrored (or allowed to clobber NVS)
+  TEST_ASSERT_EQUAL_INT(CFG_SYNC_NONE, cfgSyncAction(true, 0, true, false));
+  TEST_ASSERT_EQUAL_INT(CFG_SYNC_NONE, cfgSyncAction(true, CFG_MIRROR_MAX + 1, true, false));
+  TEST_ASSERT_EQUAL_INT(CFG_SYNC_SAVE_TO_NVS, cfgSyncAction(true, CFG_MIRROR_MAX, false, false));
+}
+
 int main(int, char**)
 {
   UNITY_BEGIN();
@@ -411,5 +447,8 @@ int main(int, char**)
   RUN_TEST(test_readReply_oversized_chunk_is_bounded);
   RUN_TEST(test_fuzz_parsers_hold_invariants);
   RUN_TEST(test_fuzz_readReply_terminates_and_bounds_output);
+  RUN_TEST(test_cfgNvsKey_only_for_mirrored_files);
+  RUN_TEST(test_cfgSyncAction_restores_what_an_update_erased);
+  RUN_TEST(test_cfgSyncAction_file_wins_when_present);
   return UNITY_END();
 }

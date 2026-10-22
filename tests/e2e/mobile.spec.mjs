@@ -36,11 +36,19 @@ test.describe('Mobile viewport', () => {
 
   test('navigation is reachable and switches tabs by tap', async ({ page, mock }) => {
     await openApp(page, mock);
-    const tab = page.locator('.tablink', { hasText: 'Parameters' });
-    await expect(tab).toBeVisible();
-    await tab.tap();
+    // Bottom bar: the most used tabs, one tap away
+    const bar = page.locator('#bottombar');
+    await expect(bar).toBeVisible();
+    await bar.locator('.bb-item', { hasText: 'Params' }).tap();
     await expect(page.locator('#params tr', { hasText: 'fweak' })).toBeVisible();
     await expect(page).toHaveURL(/#parameters$/);
+    // More opens the full menu as a drawer; picking a section closes it
+    await expect(page.locator('.tablink', { hasText: 'Settings' })).not.toBeInViewport();
+    await page.locator('#bottombar-more').tap();
+    await page.locator('.tablink', { hasText: 'Settings' }).tap();
+    await expect(page).toHaveURL(/#settings/);
+    await expect(page.locator('.tablink', { hasText: 'Settings' })).not.toBeInViewport();
+    await expect(page.locator('#bottombar-more')).toHaveClass(/active/); // Settings lives under More
   });
 
   test('a parameter can be edited on a phone', async ({ page, mock }) => {

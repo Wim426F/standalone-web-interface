@@ -8,7 +8,7 @@ import js from '@eslint/js';
 const browserGlobals = {
   window: 'readonly', document: 'readonly', navigator: 'readonly',
   location: 'readonly', history: 'readonly', localStorage: 'readonly',
-  fetch: 'readonly', FormData: 'readonly', Blob: 'readonly', File: 'readonly',
+  fetch: 'readonly', Headers: 'readonly', FormData: 'readonly', Blob: 'readonly', File: 'readonly',
   URL: 'readonly', URLSearchParams: 'readonly', AbortController: 'readonly',
   XMLHttpRequest: 'readonly', WebSocket: 'readonly', EventSource: 'readonly',
   setTimeout: 'readonly', clearTimeout: 'readonly',
@@ -17,7 +17,7 @@ const browserGlobals = {
   alert: 'readonly', confirm: 'readonly', prompt: 'readonly',
   console: 'readonly', performance: 'readonly',
   FileReader: 'readonly', TextDecoder: 'readonly', TextEncoder: 'readonly',
-  ResizeObserver: 'readonly', getComputedStyle: 'readonly',
+  ResizeObserver: 'readonly', getComputedStyle: 'readonly', Event: 'readonly',
 };
 
 export default [
@@ -65,8 +65,22 @@ export default [
     rules: { ...js.configs.recommended.rules },
   },
   {
+    // Remote support bridge: a classic script whose `inverter` global is
+    // called by openinverter.org's support script on remote.html
+    files: ['data/inverter.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: { fetch: 'readonly' },
+    },
+    rules: {
+      ...js.configs.recommended.rules,
+      'no-unused-vars': ['error', { varsIgnorePattern: '^inverter$' }],
+    },
+  },
+  {
     // Live demo transport + data: plain browser scripts loaded before app.js
-    files: ['demo/*.js'],
+    files: ['demo/*.js', 'demo/flash/*.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',

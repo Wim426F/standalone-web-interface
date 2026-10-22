@@ -5,6 +5,130 @@ const { h, render, createContext } = preact;
 const { useState, useEffect, useLayoutEffect, useReducer, useContext, useRef, useMemo } = preactHooks;
 const html = htm.bind(h);
 
+// ==================== Users & sign-in ====================
+// Opt-in on the device: with no users there, sign-in is off and AUTH says
+// everyone is an admin (exactly the old behaviour). The device enforces
+// every permission; this side only keeps the UI honest — controls a role
+// can't use are disabled, and refusals are explained (401 -> sign in again,
+// 403 -> a toast).
+const AUTH = { enabled: false, user: null, role: 'admin', remember: false, passwordMin: 8 };
+const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
+const ROLE_LABEL = { viewer: 'Viewer', operator: 'Operator', admin: 'Admin' };
+const ROLE_HELP = {
+  viewer: 'Read-only: values, parameters, plots, gauges and logs',
+  operator: 'Viewer + change parameters, save, start/stop, CAN mapping, data files',
+  admin: 'Operator + users, WiFi and device settings, firmware updates',
+};
+const can = (need) => !AUTH.enabled || (ROLE_RANK[AUTH.role] || 0) >= (ROLE_RANK[need] || 99);
+
+// Small transient messages (bottom of the screen; above the phone's home bar)
+function showToast(msg, kind) {
+  let box = document.getElementById('oi-toasts');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'oi-toasts';
+    box.setAttribute('role', 'status');
+    box.setAttribute('aria-live', 'polite');
+    document.body.appendChild(box);
+  }
+  const t = document.createElement('div');
+  t.className = 'oi-toast' + (kind ? ' ' + kind : '');
+  t.textContent = msg;
+  box.appendChild(t);
+  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 300); }, 3800);
+}
+
+// Same-origin calls carry X-OI-Auth: a page on another site can't set it
+// (and the cookie is SameSite=Strict too), which is how the device tells the
+// UI's own requests from cross-site ones. Cross-origin calls (GitHub, the
+// parameter database) go out untouched.
+const _rawFetch = window.fetch.bind(window);
+let _lastForbidToast = 0;
+function authResponseSeen(path, status, needRole) {
+  if (!AUTH.enabled || /\/auth\/[a-z-]+$/.test(path)) return;
+  if (status === 401) authLapsed();
+  else if (status === 403 && Date.now() - _lastForbidToast > 3000) {
+    _lastForbidToast = Date.now();
+    showToast(needRole ? 'Your ' + (ROLE_LABEL[AUTH.role] || '') + ' account can\'t do that — it needs ' + (ROLE_LABEL[needRole] || needRole) + ' access.'
+      : 'Not allowed for your account.', 'bad');
+  }
+}
+window.fetch = async (input, init) => {
+  let u;
+  try { u = new URL(typeof input === 'string' ? input : input.url, location.href); } catch (e) { return _rawFetch(input, init); }
+  if (u.origin !== location.origin) return _rawFetch(input, init);
+  const opts = { ...(init || {}) };
+  const hd = new Headers(opts.headers || {});
+  if (!hd.has('X-OI-Auth')) hd.set('X-OI-Auth', '1');
+  opts.headers = hd;
+  const r = await _rawFetch(input, opts);
+  if (AUTH.enabled && (r.status === 401 || r.status === 403)) {
+    let need = null;
+    if (r.status === 403) { try { need = (await r.clone().json()).need; } catch (e) {} }
+    authResponseSeen(u.pathname, r.status, need);
+  }
+  return r;
+};
+
+// The session ended under us (expired, signed out elsewhere, user removed
+// or changed): back to the sign-in screen, which then reloads into the app
+let setRootView = null;
+function authLapsed() {
+  if (setRootView) setRootView({ view: 'login', note: 'Your session has ended — sign in again.' });
+}
+
+async function authLoadState() {
+  try {
+    const r = await _rawFetch('/auth/state', { headers: { 'X-OI-Auth': '1' }, cache: 'no-store' });
+    // Older firmware (no /auth/*): sign-in doesn't exist there
+    if (!r.ok) return { enabled: false };
+    return await r.json();
+  } catch (e) { return { enabled: false }; }
+}
+
+function authApply(st) {
+  AUTH.enabled = st.enabled === true;
+  AUTH.user = st.user || null;
+  AUTH.role = AUTH.enabled ? (st.role || null) : 'admin';
+  AUTH.remember = st.remember === true;
+  if (st.password_min) AUTH.passwordMin = st.password_min;
+  document.body.classList.toggle('auth-on', AUTH.enabled);
+  for (const r of ['viewer', 'operator', 'admin']) document.body.classList.toggle('role-' + r, AUTH.enabled && AUTH.role === r);
+}
+
+async function authPost(path, fields) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(fields).toString(),
+  });
+  let body = {};
+  try { body = await r.json(); } catch (e) {}
+  if (!r.ok) {
+    const err = new Error(body.error || ('HTTP ' + r.status));
+    err.status = r.status;
+    err.retryAfter = parseInt(r.headers.get('Retry-After')) || 0;
+    throw err;
+  }
+  return body;
+}
+
+async function authSignOut() {
+  try { await authPost('/auth/logout', {}); } catch (e) {}
+  location.reload();
+}
+
+// Wraps controls a role can't use: disabled (inert) and dimmed. Purely a
+// courtesy — the device refuses the request anyway.
+// Allowed: no wrapper at all, so the DOM is exactly what it was before
+// sign-in existed. Blocked: a display:contents wrapper (keeps flex layouts);
+// don't use it inside CSS multi-column containers (Chromium drops such
+// children from the columns) — mark the container inert instead.
+const Gate = ({ need, children }) => {
+  if (can(need)) return children;
+  return html`<div class="perm-gate" inert data-need=${need}>${children}</div>`;
+};
+
 // ==================== API ====================
 const api = {
   _cache: {},
@@ -32,7 +156,10 @@ const api = {
     try {
       const r = await fetch(url, opts);
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      return await r.text();
+      const text = await r.text();
+      // Flash and RAM agree again after a save or a restore from flash
+      if (/^(save|load)\s*$/.test(cmd)) window.dispatchEvent(new Event('oi-params-saved'));
+      return text;
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -69,6 +196,7 @@ const api = {
     // Every UI-issued 'set' flows through here — the one place the change
     // log can see them all (table edits, presets, action/toggle/slider tiles)
     try { logParamSet(name, value, ok); } catch (e) {}
+    if (ok) window.dispatchEvent(new Event('oi-param-set')); // live, not yet in flash
     return { ok, reply };
   },
 
@@ -157,6 +285,7 @@ const api = {
   // two overlapping uploads could otherwise finish out of order and persist
   // the stale one
   saveFavorites(paramFavs, spotFavs) {
+    if (!can('operator')) return; // viewers: favourites stay in this page only
     this._favData = { p: paramFavs || [], s: spotFavs || [] };
     clearTimeout(this._favTimer);
     this._favTimer = setTimeout(async () => {
@@ -206,6 +335,7 @@ const initialState = {
   firmwareVersion: '',
   fetchAge: 0,
   activeTab: parseHash().tab || 'dashboard',
+  unsavedParams: 0, // parameter sets since the last save/restore (Parameters save bar)
   refreshRate: 3000, // -1 = off, else ms interval
   paramFavorites: [],
   spotFavorites: [],
@@ -239,6 +369,7 @@ const initialState = {
 // the device (presets.json) and carried by the settings export wholesale.
 
 function savePresetsToDevice(presets) {
+  if (!can('operator')) return Promise.resolve();
   const blob = new Blob([JSON.stringify({ v: 1, presets })], { type: 'application/json' });
   const fd = new FormData();
   fd.append('updatefile', blob, 'presets.json');
@@ -280,6 +411,7 @@ async function loadParamLog() {
   return _paramLog;
 }
 function writeParamLog(entries) {
+  if (!can('operator')) return Promise.resolve();
   const fd = new FormData();
   fd.append('updatefile', new Blob([JSON.stringify({ v: 1, entries })], { type: 'application/json' }), 'paramlog.json');
   return fetch('/edit', { method: 'POST', body: fd }).catch(() => {});
@@ -418,6 +550,8 @@ function reducer(state, action) {
       const fc = state.failedFetchCount + 1;
       return { ...state, failedFetchCount: fc, commError: fc >= 2, fetching: false,
                canConnected: state.canMode ? (fc < 2 && state.canConnected) : false };
+    case 'PARAMS_UNSAVED':
+      return { ...state, unsavedParams: action.payload === 0 ? 0 : state.unsavedParams + 1 };
     case 'SET_ACTIVE_TAB':
       return { ...state, activeTab: action.payload };
     case 'SET_UPDATE_TAG':
@@ -549,6 +683,7 @@ const ICONS = {
   life: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="4.93" y1="4.93" x2="9.17" y2="9.17"/><line x1="14.83" y1="14.83" x2="19.07" y2="19.07"/><line x1="14.83" y1="9.17" x2="19.07" y2="4.93"/><line x1="4.93" y1="19.07" x2="9.17" y2="14.83"/>',
   compare: '<polyline points="8 7 3 12 8 17"/><polyline points="16 7 21 12 16 17"/><line x1="3" y1="12" x2="21" y2="12"/>',
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
 };
 const Icon = ({ n, size = 13 }) => html`<span class="btn-ic" dangerouslySetInnerHTML=${{
   __html: '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (ICONS[n] || '') + '</svg>'
@@ -621,9 +756,21 @@ const tabs = [
   { id: 'support', label: 'Support', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' },
 ];
 
+// Sidebar groups (Homestead-style section labels)
+const TAB_GROUPS = [
+  ['Monitor', ['dashboard', 'gauges', 'spotvalues', 'plot', 'logger']],
+  ['Configure', ['parameters', 'canmapping']],
+  ['Device', ['files', 'update', 'settings', 'support']],
+];
+const tabGroupOf = (id) => (TAB_GROUPS.find(([, ids]) => ids.includes(id)) || ['', []])[0];
+// Phone bottom bar: the four most used, the rest behind More
+const BOTTOM_TABS = [['dashboard', 'Home'], ['gauges', 'Gauges'], ['spotvalues', 'Values'], ['parameters', 'Params']];
+const closeNavDrawer = () => document.body.classList.remove('nav-open');
+
 const Navbar = () => {
   const { state, dispatch } = useContext(Store);
   const active = state.activeTab;
+  const go = (id) => { closeNavDrawer(); dispatch({ type: 'SET_ACTIVE_TAB', payload: id }); };
 
   return html`
     <aside id="navbar">
@@ -643,13 +790,20 @@ const Navbar = () => {
             <path stroke="#ff6b6b" opacity=".95" transform="translate(24 0)" d="M-30 24 C -24 11, -18 11, -12 24 C -6 37, 0 37, 6 24 C 12 11, 18 11, 24 24 C 30 37, 36 37, 42 24 C 48 11, 54 11, 60 24" />
           </g>
         </svg>
+        <span class="brand-name navbar-text">OpenInverter</span>
       </div>
-      ${tabs.map(t => html`
-        <div class="tablink ${active === t.id ? 'active' : ''}" onclick=${() => dispatch({ type: 'SET_ACTIVE_TAB', payload: t.id })}>
-          <span class="tab-icon" dangerouslySetInnerHTML=${{ __html: t.icon }}></span>
-          <span class="navbar-text">${t.label}</span>
-        </div>
+      <nav aria-label="Sections">
+      ${TAB_GROUPS.map(([group, ids]) => html`
+        <div class="navlbl navbar-text" key=${group}>${group}</div>
+        ${ids.map(id => tabs.find(t => t.id === id)).filter(Boolean).map(t => html`
+          <button type="button" key=${t.id} class="tablink ${active === t.id ? 'active' : ''}" aria-current=${active === t.id ? 'page' : undefined}
+            title=${t.label} onclick=${() => go(t.id)}>
+            <span class="tab-icon" dangerouslySetInnerHTML=${{ __html: t.icon }}></span>
+            <span class="navbar-text">${t.label}</span>
+          </button>
+        `)}
       `)}
+      </nav>
       ${state.deviceName && html`<div id="device-name" title="Device name — set in Settings">${state.deviceName}</div>`}
       <div id="version" style=${state.deviceName ? 'margin-top:6px' : ''}>
         ${state.firmwareVersion && html`F/W: ${state.firmwareVersion}<br/>`}Web: ${state.webVersion || '—'}
@@ -692,7 +846,7 @@ const Navbar = () => {
         <div class="control" style="flex-direction:column;align-items:flex-start;gap:2px">
           <span style="font-size:.65rem;text-transform:uppercase;letter-spacing:.05em">CAN Device</span>
           <div class="can-node-select">
-            <select value=${state.canActiveNodeId} onchange=${e => {
+            <select value=${state.canActiveNodeId} disabled=${!can('operator')} onchange=${e => {
               const id = parseInt(e.target.value);
               dispatch({ type: 'SET_CAN_NODE', payload: id });
               fetch('/set-can-node?id=' + id);
@@ -711,153 +865,59 @@ const Navbar = () => {
         const label = state.canMode ? 'CAN #' + state.canActiveNodeId : 'UART';
         return html`<div style="text-align:center;padding:4px 0 0"><span style="background:${ok ? 'var(--green)' : 'var(--red)'};color:${ok ? '#06301d' : '#fff'};padding:2px 8px;border-radius:10px;font-size:.65rem;font-weight:700;letter-spacing:.03em">${label}</span></div>`;
       })()}
+      ${AUTH.enabled && html`
+        <div id="whoami" class="whoami" title=${AUTH.user + ' — ' + (ROLE_LABEL[AUTH.role] || AUTH.role) + ' (open your account)'}
+          onclick=${() => { closeNavDrawer(); history.replaceState(null, '', '#settings/users'); dispatch({ type: 'SET_ACTIVE_TAB', payload: 'settings' }); }}>
+          <span class="user-avatar">${(AUTH.user || '?').slice(0, 2).toUpperCase()}</span>
+          <span class="whoami-text">
+            <span class="whoami-name">${AUTH.user}</span>
+            <span class="role-pill role-${AUTH.role}">${AUTH.role === 'viewer' ? 'Read-only' : ROLE_LABEL[AUTH.role]}</span>
+          </span>
+        </div>
+        <button id="signout" class="signout" onclick=${authSignOut} title="Sign out"><${Icon} n="logout" /><span class="navbar-text">Sign out</span></button>
+      `}
     </aside>
   `;
 };
 
+// Glass top bar: where you are (breadcrumb) and the page title
+const TopBar = () => {
+  const { state } = useContext(Store);
+  const t = tabs.find(x => x.id === state.activeTab) || tabs[0];
+  const title = t.id === 'dashboard' ? (state.deviceName || 'Dashboard') : t.label;
+  return html`
+    <header id="topbar">
+      <div style="min-width:0">
+        <div class="crumb">${tabGroupOf(t.id)}<span class="crumbsep">/</span><span class="crumb-cur">${t.label}</span></div>
+        <h1 class="page-title">${title}</h1>
+      </div>
+    </header>`;
+};
+
+// Phone navigation: four tabs and More (the full sidebar as a drawer)
+const BottomBar = () => {
+  const { state, dispatch } = useContext(Store);
+  const inBar = BOTTOM_TABS.some(([id]) => id === state.activeTab);
+  return html`
+    <nav id="bottombar" aria-label="Sections">
+      ${BOTTOM_TABS.map(([id, label]) => {
+        const t = tabs.find(x => x.id === id);
+        return html`<button type="button" key=${id} class="bb-item ${state.activeTab === id ? 'active' : ''}"
+          aria-current=${state.activeTab === id ? 'page' : undefined}
+          onclick=${() => { closeNavDrawer(); dispatch({ type: 'SET_ACTIVE_TAB', payload: id }); }}>
+          <span class="tab-icon" dangerouslySetInnerHTML=${{ __html: t.icon }}></span><span>${label}</span>
+        </button>`;
+      })}
+      <button type="button" id="bottombar-more" class="bb-item ${inBar ? '' : 'active'}" aria-label="More sections"
+        onclick=${() => document.body.classList.toggle('nav-open')}>
+        <span class="tab-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></span><span>More</span>
+      </button>
+    </nav>
+    <div id="nav-scrim" onclick=${closeNavDrawer}></div>`;
+};
+
 // ==================== Dashboard ====================
 
-const Dashboard = () => {
-  const { state, dispatch } = useContext(Store);
-  const [cmd, setCmd] = useState('');
-  const [cmdOutput, setCmdOutput] = useState('');
-  const [confirmAction, setConfirmAction] = useState(null); // 'inverter' | 'esp32'
-  const [canId, setCanId] = useState('0x180');
-  const [canData, setCanData] = useState('00 00 00 00 00 00 00 00');
-
-  const send = async () => {
-    const c = cmd.trim();
-    if (!c) return;
-    setCmdOutput(o => o + '> ' + c + '\n'); // echo the outgoing command
-    setCmd('');
-    dispatch({ type: 'SET_LOGGING', payload: true }); // pause the json poll so it can't contend for the single UART
-    dispatch({ type: 'SET_CMD_BUSY', payload: true }); // show the CMD badge while the command runs
-    try {
-      // Generous timeout: a silent inverter returns empty in ~0.2s (firmware
-      // self-times-out the UART), so this only catches a hung ESP/connection —
-      // and it must comfortably clear a large/slow response like 'json' (~4s).
-      const reply = await api.getText(c, 0, 15000);
-      const text = reply.replace(/\s+$/, ''); // drop trailing whitespace/newlines
-      setCmdOutput(o => o + (text ? text : '(no response)') + '\n');
-    } catch (e) {
-      const msg = (e && e.name === 'AbortError') ? 'timed out — no response' : (e.message || 'request failed');
-      setCmdOutput(o => o + 'error: ' + msg + '\n');
-    } finally {
-      dispatch({ type: 'SET_LOGGING', payload: false });
-      dispatch({ type: 'SET_CMD_BUSY', payload: false });
-    }
-  };
-
-  return html`
-    <div id="dashboard" class="tabdiv main-content" style="display:flex">
-      <div class="main-right">
-        <h3 class="underline">Actions</h3>
-        <button onclick=${() => api.getText('start 2').then(r => dispatch({ type: 'SET_MESSAGES', payload: r }))}><${Icon} n="play" />Start inverter in manual mode</button>
-        <button onclick=${() => api.getText('stop').then(r => dispatch({ type: 'SET_MESSAGES', payload: r }))}><${Icon} n="stop" />Stop inverter</button>
-        <h3 class="underline">Reset</h3>
-        <button onclick=${() => setConfirmAction('inverter')}><${Icon} n="rotate" />Reboot Inverter</button>
-        <button onclick=${() => setConfirmAction('esp32')}><${Icon} n="power" />Reboot ESP32</button>
-      </div>
-      <div class="main-left">
-        <h2>Dashboard</h2>
-        <div id="top-row" class="dash-row">
-          <div id="top-left" class="dash-box hero-card" style="flex:1.4">
-            ${state.status != null ? (() => {
-              const offline = state.commError || (state.canMode && !state.canConnected);
-              const tone = offline ? 'danger' : opmodeTone(state.opmode);
-              const friendly = offline ? 'No connection to inverter'
-                : (OPMODE_FRIENDLY[state.opmode] || String(state.opmode == null ? '—' : state.opmode));
-              const hasErr = state.lasterr && String(state.lasterr) !== 'NONE' && String(state.lasterr) !== '0';
-              return html`
-                <div class="hero-top">
-                  <span class="pill ${tone}"><span class="dot"></span>${offline ? 'Offline' : state.opmode}</span>
-                  ${hasErr && html`<span class="pill warn">⚠ ${state.lasterr}</span>`}
-                  ${state.canMode
-                    ? html`<span class="pill ${state.canConnected ? 'info' : 'danger'}">CAN #${state.canActiveNodeId}</span>`
-                    : html`<span class="pill ${offline ? 'danger' : 'info'}">UART</span>`}
-                </div>
-                <div class="hero-state">${friendly}</div>
-                <p class="hero-sub">Status: ${state.status}</p>
-                <div class="hero-metrics">
-                  ${getDashMetrics().map((name, idx) => {
-                    const sv = state.spotValues && state.spotValues[name];
-                    const unit = (sv && sv.unit && sv.unit.indexOf('=') === -1) ? sv.unit : '';
-                    const label = DASH_METRIC_LABELS[name] || name;
-                    const disp = !sv ? '—' : (sv.enums ? String(sv.display) : fmtNum(sv.value));
-                    return html`
-                    <div class="metric ${idx === 1 ? 'tone-active' : ''}" key=${name}>
-                      <span class="metric-label">${label}</span>
-                      <span class="metric-value">${disp}${unit && html`<span class="metric-unit">${unit}</span>`}</span>
-                      <${Sparkline} data=${state.history[name]} />
-                    </div>`;
-                  })}
-                  ${state.firmwareVersion && html`
-                    <div class="metric">
-                      <span class="metric-label">Firmware</span>
-                      <span class="metric-value" style="font-size:1.05rem;line-height:1.4;margin-top:6px">${state.firmwareVersion}</span>
-                    </div>
-                  `}
-                </div>
-              `;
-            })() : html`<${Spinner} />`}
-          </div>
-          <div id="top-right" class="dash-box">
-            <h3>Inverter messages</h3>
-            <pre><div>${state.messages}</div></pre>
-          </div>
-        </div>
-        <div class="dash-row">
-          <div class="dash-box" style="flex:1">
-            <h3>Command</h3>
-            <div id="commandoutput">${cmdOutput}</div>
-            <div style="display:flex;gap:6px;margin-top:8px">
-              <input type="text" id="commandinput" value=${cmd} oninput=${e => setCmd(e.target.value)} onkeyup=${e => e.keyCode === 13 && send()} style="flex:1" />
-              <button onclick=${send} style="padding:8px 18px;font-weight:600"><${Icon} n="send" />Send</button>
-            </div>
-          </div>
-        </div>
-        ${state.canMode && html`
-        <div class="dash-row">
-          <div class="dash-box" style="flex:1">
-            <h3>CAN Message</h3>
-            <div style="display:flex;gap:8px;align-items:flex-end">
-              <label style="font-size:.75rem;flex:1">CAN ID (hex)
-                <input type="text" value=${canId} oninput=${e => setCanId(e.target.value)} style="width:100%;font-size:.75rem;padding:4px 6px;font-family:var(--mono)" />
-              </label>
-              <label style="font-size:.75rem;flex:2">Data bytes (hex, space/comma separated)
-                <input type="text" value=${canData} oninput=${e => setCanData(e.target.value)} style="width:100%;font-size:.75rem;padding:4px 6px;font-family:var(--mono)" />
-              </label>
-              <button onclick=${async () => {
-                const r = await fetch('/can-send?canId=' + encodeURIComponent(canId) + '&data=' + encodeURIComponent(canData));
-                const json = await r.json();
-                setCmdOutput(o => o + 'CAN: ' + JSON.stringify(json) + '\n');
-              }} style="font-size:.75rem;padding:6px 14px;white-space:nowrap"><${Icon} n="send" />Send</button>
-            </div>
-          </div>
-        </div>
-        `}
-      </div>
-    </div>
-    ${confirmAction && html`
-      <${Modal} id="reset-modal" title=${confirmAction === 'inverter' ? 'Reset inverter' : 'Reboot ESP32'} onClose=${() => setConfirmAction(null)}>
-        <p>${confirmAction === 'inverter'
-          ? 'This will send a reset command to the inverter (STM32). The inverter will reboot. The web interface will remain accessible.'
-          : 'This will reboot the ESP32 itself. You will temporarily lose connection to the web interface.'}</p>
-        <div style="display:flex;gap:8px;margin-top:1rem">
-          <button onclick=${() => setConfirmAction(null)}>Cancel</button>
-          <button onclick=${async () => {
-            setConfirmAction(null);
-            if (confirmAction === 'inverter') {
-              await fetch('/reset-inverter');
-            } else {
-              await fetch('/reboot');
-            }
-          }} style="background:var(--red);color:#fff;border-color:transparent">Confirm</button>
-        </div>
-      </${Modal}>
-    `}
-  `;
-};
 
 // ==================== Parameters ====================
 
@@ -1156,12 +1216,16 @@ const Parameters = () => {
         </button>
         <div class="collapsible-actions ${actionsOpen ? 'open' : ''}">
         <h3 class="underline">Save & Load</h3>
+        <${Gate} need="operator">
         <button onclick=${() => api.getText('save').then(r => alert(r || 'Parameters saved'))}><${Icon} n="save" />Save parameters to flash</button>
         <button onclick=${() => api.getText('load')}><${Icon} n="undo" />Restore parameters from flash</button>
+        </${Gate}>
         <a download="params.json" href=${'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(state.params, null, 2))}><button><${Icon} n="download" />Download parameters file</button></a>
         ${/* No accept filter: Android pickers report .json as octet-stream/plain and grey it out; we validate JSON in loadParamsFromFile instead. */ ''}
+        <${Gate} need="operator">
         <input id="paramfile" type="file" hidden onchange=${loadParamsFromFile} />
         <label class="butt" for="paramfile"><${Icon} n="upload" />Load parameters from file</label>
+        </${Gate}>
         ${/* Compare: a read-only diff of a params file against the live values */ ''}
         <input id="comparefile" type="file" hidden onchange=${compareParamsFile} />
         <label class="butt" for="comparefile"><${Icon} n="compare" />Compare to file</label>
@@ -1174,6 +1238,7 @@ const Parameters = () => {
           <p id="progress-msg">${applyMsg}</p>
         `}
         <h3 class="underline">Presets</h3>
+        <${Gate} need="operator">
         ${state.presets.map(pr => html`
           <div class="preset-row" key=${pr.id}>
             <span class="preset-name" title=${Object.keys(pr.params || {}).length + ' parameter(s)'}>${pr.name}</span>
@@ -1185,10 +1250,13 @@ const Parameters = () => {
         `)}
         <button onclick=${() => openPresetEditor(null)}><${Icon} n="plus" />New preset</button>
         ${state.presets.length === 0 && html`<p style="font-size:.72rem;color:var(--text3);margin:.25rem 0 0">A preset is a named set of parameter values you can apply in one tap — here, or from an Action button on a gauges page.</p>`}
+        </${Gate}>
         <h3 class="underline">Parameter Database</h3>
         <button onclick=${submitToDatabase}><${Icon} n="cloud" />Submit parameters</button>
+        <${Gate} need="operator">
         <button onclick=${() => setShowSubscribe(true)}><${Icon} n="rss" />Subscribe to parameter set</button>
         <button onclick=${stopSubscription}><${Icon} n="x" />Stop subscription</button>
+        </${Gate}>
         <h3 class="underline">Misc</h3>
         <a href="/syncofs.html" target="_blank"><button><${Icon} n="external" />Launch syncofs tuner</button></a>
         <a href="https://openinverter.org/wiki/Parameters" target="_blank"><button><${Icon} n="book" />Parameter reference</button></a>
@@ -1196,6 +1264,16 @@ const Parameters = () => {
       </div>
       <div class="main-left">
         <h2>Parameters</h2>
+        ${state.unsavedParams > 0 && can('operator') && html`
+          <div id="savebar" class="savebar" role="status">
+            <span class="savebar-dot" aria-hidden="true"></span>
+            <b>${state.unsavedParams} change${state.unsavedParams === 1 ? ' is' : 's are'} live but not saved to flash</b>
+            <span class="savebar-sub">Lost when the inverter restarts.</span>
+            <span class="savebar-actions">
+              <button onclick=${() => api.getText('load').then(() => api.getJSON('json')).then(json => dispatch({ type: 'SET_PARAMS', payload: json })).catch(() => {})}><${Icon} n="undo" />Restore from flash</button>
+              <button class="primary" onclick=${() => api.getText('save').then(r => showToast((r || '').trim() || 'Parameters saved', 'ok')).catch(e => showToast('Save failed: ' + e.message, 'error'))}><${Icon} n="save" />Save to flash</button>
+            </span>
+          </div>`}
         <table id="params" class="fullheight" style="width:auto;table-layout:auto">
           <thead><tr><th></th><th>I</th><th>Name</th><th>Value</th><th>Unit</th><th>Min</th><th>Max</th><th>Default</th></tr></thead>
           <tbody id="paramBody">
@@ -1215,14 +1293,14 @@ const Parameters = () => {
                   <td><div class="tooltip">${p.name}<span class="tooltiptext ${docstrings.get(p.name) ? '' : 'tooltiptext-empty'}">${docstrings.get(p.name) || 'No description available.'}</span></div></td>
                   <td>
                     ${p.enums ? html`
-                      <select class="styled" value=${String(p.value)} onchange=${e => saveParam(p.name, e.target.value)}>
+                      <select class="styled" value=${String(p.value)} disabled=${!can('operator')} onchange=${e => saveParam(p.name, e.target.value)}>
                         ${Object.keys(p.enums).map(k => html`<option value=${k}>${p.enums[k]}</option>`)}
                       </select>
                     ` : html`
                       ${/* Always-editable: focusing snapshots the value so the
                           poll can't revert keystrokes; Enter/blur commit only
                           when the value actually changed, Escape reverts */ ''}
-                      <input type="number" min=${p.minimum} max=${p.maximum} step="0.05"
+                      <input type="number" min=${p.minimum} max=${p.maximum} step="0.05" readonly=${!can('operator')}
                         value=${editing === p.name ? editValue : p.value}
                         onfocus=${() => { setEditing(p.name); setEditValue(String(p.value)); }}
                         oninput=${e => { if (editing !== p.name) setEditing(p.name); // Enter ends the session but keeps focus
@@ -1604,6 +1682,76 @@ const exportUiSettings = async () => {
   a.click();
 };
 
+// ==================== Keeping settings across updates ====================
+// A web-interface update rewrites the whole filesystem. The device keeps its
+// own config (settings.json, uiprefs.json) in NVS and puts it back itself;
+// the UI layouts are too big for that, so the browser stashes them just
+// before flashing and uploads any the update erased once it's back.
+const UPDATE_STASH_KEY = 'oi-update-restore';
+const UPDATE_STASH_FILES = ['gauges.json', 'plots.json', 'presets.json', 'favorites.json', 'virtualvals.json', 'paramlog.json'];
+const UPDATE_STASH_MAX_AGE = 24 * 3600 * 1000;
+
+async function stashFilesForUpdate() {
+  const files = {};
+  // Only files that really exist: the firmware serves built-in defaults for
+  // missing layout files, and stashing those would "restore" them later
+  let present;
+  try {
+    const r = await fetch('/list', { cache: 'no-store' });
+    present = r.ok ? new Set((await r.json()).map(f => String(f.name).replace(/^\/+/, ''))) : null;
+  } catch (e) { present = null; }
+  await Promise.all(UPDATE_STASH_FILES.filter(n => !present || present.has(n)).map(async name => {
+    try {
+      const r = await fetch('/' + name, { cache: 'no-store' });
+      if (r.ok) files[name] = await r.text();
+    } catch (e) {}
+  }));
+  try { localStorage.setItem(UPDATE_STASH_KEY, JSON.stringify({ at: Date.now(), files })); } catch (e) { return -1; }
+  return Object.keys(files).length;
+}
+
+// Runs once at load (after sign-in when that's on). Only fills in files the
+// update erased: anything already on the device is newer and left alone.
+async function restoreFilesAfterUpdate() {
+  let stash;
+  try { stash = JSON.parse(localStorage.getItem(UPDATE_STASH_KEY) || 'null'); } catch (e) { stash = null; }
+  if (!stash || !stash.files) return 0;
+  if (!(Date.now() - stash.at < UPDATE_STASH_MAX_AGE)) { try { localStorage.removeItem(UPDATE_STASH_KEY); } catch (e) {} return 0; }
+  if (!can('operator')) return 0; // keep it for someone who can write
+  // What's really on the filesystem comes from /list: the firmware answers
+  // a missing gauges/plots/favourites file with built-in defaults (200), so
+  // fetching the file can't tell "erased" from "saved"
+  let present;
+  try {
+    const r = await fetch('/list', { cache: 'no-store' });
+    if (!r.ok) return 0; // signed out or device unsure: try again next load
+    present = new Set((await r.json()).map(f => String(f.name).replace(/^\/+/, '')));
+  } catch (e) { return 0; }
+  let restored = 0;
+  for (const [name, text] of Object.entries(stash.files)) {
+    if (present.has(name)) continue; // already there (newer): leave it
+    try {
+      const fd = new FormData();
+      fd.append('updatefile', new Blob([text], { type: 'application/json' }), name);
+      const up = await fetch('/edit', { method: 'POST', body: fd });
+      if (!up.ok) return restored;
+      restored++;
+    } catch (e) { return restored; }
+  }
+  try { localStorage.removeItem(UPDATE_STASH_KEY); } catch (e) {}
+  return restored;
+}
+
+const resetDeviceSettings = async () => {
+  if (!confirm('Reset the device settings to their defaults?\n\nUART/CAN pins, CAN node and speed, device name, SD and UI preferences go back to defaults and the device reboots. You may need to set the UART or CAN pins again before it can talk to the inverter.\n\nUser accounts, Wi-Fi and your layouts are kept.')) return;
+  try {
+    const r = await fetch('/settings', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'reset_settings=1' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    alert('Settings reset — the device is rebooting. The page reloads in a few seconds.');
+    setTimeout(() => location.reload(), 7000);
+  } catch (e) { alert('Reset failed: ' + e.message); }
+};
+
 // ==================== Update ====================
 
 const Update = () => {
@@ -1732,9 +1880,11 @@ const Update = () => {
     // refused by the chip check anyway, but only after a full download
     const warn = !name.startsWith(canonTarget(otaTarget) + '_')
       ? '\n\nWARNING: this image is not built for this board (' + otaTarget + ') — the device will refuse to activate it.' : '';
-    if (!confirm('Download and install "' + name + '"?' + warn + '\n\nThis erases saved settings and favourites (the whole filesystem is replaced) — export them first if you want to keep them.\n\nThe device will reboot when done.')) return;
+    if (!confirm('Download and install "' + name + '"?' + warn + '\n\nDevice settings are kept, and your layouts (gauges, plots, presets, favourites) are backed up in this browser and restored after the reboot.\n\nThe device will reboot when done.')) return;
     setGhMsg('');
-    setUpdating(true); setProgress(0); setUpdateMsg('Device is downloading ' + name + ' — do not power off.');
+    setUpdating(true); setProgress(0); setUpdateMsg('Backing up your layouts...');
+    if (await stashFilesForUpdate() < 0 && !confirm('Could not back up your layouts in this browser (storage full or blocked). Continue anyway? Export them first if you want to keep them.')) { setUpdating(false); return; }
+    setUpdateMsg('Device is downloading ' + name + ' — do not power off.');
     dispatch({ type: 'SET_LOGGING', payload: true });
     try {
       const r = await fetch('/espupdate-url', {
@@ -1910,8 +2060,10 @@ const Update = () => {
   const flashEsp = (file) => new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/espupdate');
+    xhr.setRequestHeader('X-OI-Auth', '1');
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) setProgress(Math.round(100 * e.loaded / e.total)); };
     xhr.onload = () => {
+      if (xhr.status === 401 || xhr.status === 403) authResponseSeen('/espupdate', xhr.status, 'admin');
       let ok = xhr.status === 200;
       try { ok = JSON.parse(xhr.responseText).ok; } catch (err) {}
       if (ok) resolve();
@@ -1935,8 +2087,10 @@ const Update = () => {
     }
     const wrongBoard = !file.name.startsWith(canonTarget(otaTarget) + '_');
     const warn = wrongBoard ? '\n\nWARNING: this image is not built for this board (' + otaTarget + ').' : '';
-    if (!confirm('Update the web interface from "' + file.name + '"?' + warn + '\n\nThis erases saved settings and favourites (the whole filesystem is replaced) — export them first if you want to keep them.\n\nThe device will reboot when done.')) return;
-    setUpdating(true); setProgress(0); setUpdateMsg('Uploading OTA image...');
+    if (!confirm('Update the web interface from "' + file.name + '"?' + warn + '\n\nDevice settings are kept, and your layouts (gauges, plots, presets, favourites) are backed up in this browser and restored after the reboot.\n\nThe device will reboot when done.')) return;
+    setUpdating(true); setProgress(0); setUpdateMsg('Backing up your layouts...');
+    if (await stashFilesForUpdate() < 0 && !confirm('Could not back up your layouts in this browser (storage full or blocked). Continue anyway? Export them first if you want to keep them.')) { setUpdating(false); return; }
+    setUpdateMsg('Uploading OTA image...');
     dispatch({ type: 'SET_LOGGING', payload: true }); // pause polling so it doesn't compete with the upload
     try {
       await flashEsp(file);
@@ -1953,6 +2107,7 @@ const Update = () => {
   return html`
     <div id="update" class="tabdiv main-content" style="display:flex">
       <div class="main-right">
+        <${Gate} need="admin">
         <h3 class="underline">Inverter/VCU Firmware</h3>
         <form id="upload-firmware-form" enctype="multipart/form-data">
           <input id="update-firmware-file" name="update-firmware-file" type="file" accept=".bin" ref=${fileRef} hidden onchange=${installFirmware} />
@@ -1973,7 +2128,7 @@ const Update = () => {
           <p id="update-newer-note" style="color:var(--accent);font-size:.78rem;font-weight:600;margin:0 0 .25rem">▲ Newer release available: ${state.updateTag}</p>
           <div class="flex-break"></div>
         `}
-        <button onclick=${exportUiSettings} title="Updating erases saved settings — back them up first"><${Icon} n="download" />Export settings (backup)</button>
+        <button onclick=${exportUiSettings} title="Download a backup of your layouts and preferences"><${Icon} n="download" />Export settings (backup)</button>
         <div class="flex-break"></div>
         <input type="text" value=${ghUrl} oninput=${e => setGhUrl(e.target.value)}
           placeholder="https://github.com/owner/repo" style="width:100%;margin-bottom:.25rem;font-size:.8rem" />
@@ -2015,10 +2170,12 @@ const Update = () => {
           </div>
           <p id="progress-msg">${updateMsg}</p>
         `}
+        </${Gate}>
       </div>
       <div class="main-left">
         <h2>Update</h2>
         <p>On this page you can apply software updates to your OpenInverter system.</p>
+        ${!can('admin') && html`<p class="perm-note" id="update-perm-note">Firmware updates need an <b>admin</b> account — you are signed in as ${ROLE_LABEL[AUTH.role] || AUTH.role}.</p>`}
         <div class="dash-box compact" style="margin-bottom:1rem">
           <h3>Inverter / VCU Firmware</h3>
           <p>Updates the firmware on the <b>inverter or VCU board itself</b> (stm32_sine, stm32_foc, ZombieVerter…) — not this web interface.</p>
@@ -2031,7 +2188,7 @@ const Update = () => {
           <p>A daily check flags newer releases with a badge in the sidebar (toggle it off with <b>Daily update check</b>). When one is available its release list loads automatically; otherwise <b>Get releases</b> lists them from the GitHub repo above (pre-filled with the repo this build came from). The image for your board is selected by default — then <b>Download & install</b>, or use <b>Install OTA image from file</b> to flash one you built locally.</p>
           <p><b>Update channel</b>: <b>Stable</b> (default) offers tested releases only. <b>Dev</b> also offers the pre-releases (<code>vX.Y-dev.N</code>) built from every change on the dev branch — newer, less tested; a dev device still moves on to the stable release that follows them.</p>
           <p>Use <b>Upload single file</b> for individual file tweaks.</p>
-          <p><b>Updating erases your saved settings and favourites</b> — the whole filesystem is replaced. Use <b>Export settings (backup)</b> first, then restore them from Settings afterwards.</p>
+          <p><b>Your settings survive updates.</b> The device keeps its own settings (pins, CAN, name, UI preferences) and user accounts outside the filesystem. Your layouts — gauges, plots, presets, favourites — are backed up in this browser just before flashing and put back automatically after the reboot. <b>Export settings (backup)</b> is still worth doing before flashing over USB or from another browser.</p>
           <p style="font-size:.8rem;color:var(--text3);margin:0">The bootloader and partition table aren't touched, so a bad image stays recoverable over USB. The web interface reboots and the page reloads when done.</p>
         </div>
       </div>
@@ -2289,6 +2446,7 @@ const Plot = () => {
   };
 
   const savePlots = async () => {
+    if (!can('operator')) return;
     try {
       const json = JSON.stringify({ plots, maxValues, burstLength });
       const blob = new Blob([json], { type: 'application/json' });
@@ -2565,6 +2723,7 @@ const CanMapping = () => {
     <div id="canmapping" class="tabdiv main-content" style="display:flex">
       <div class="main-right">
         <h3 class="underline">Actions</h3>
+        <${Gate} need="operator">
         <button onclick=${() => setMappings([...mappings, { name: '', txrx: 'tx', canid: 0, pos: 0, bits: 8, gain: 1 }])}><${Icon} n="plus" />Add new mapping</button>
         <button onclick=${saveMappings}><${Icon} n="save" />Save mappings to flash</button>
         ${state.canMode && html`<button onclick=${loadMappings}><${Icon} n="refresh" />Reload from device</button>`}
@@ -2575,6 +2734,7 @@ const CanMapping = () => {
           setMappings([]);
           loadMappings();
         }} style="color:var(--red)"><${Icon} n="trash" />Remove all mappings</button>
+        </${Gate}>
       </div>
       <div class="main-left">
         <h2>CAN Mapping</h2>
@@ -2597,7 +2757,7 @@ const CanMapping = () => {
                     <td>${m.length}</td>
                     <td>${m.gain}</td>
                     <td>${m.offset}</td>
-                    <td><button onclick=${() => removeMap(m)} style="padding:2px 6px;font-size:.7rem;color:var(--red)">✕</button></td>
+                    <td><button onclick=${() => removeMap(m)} disabled=${!can('operator')} style="padding:2px 6px;font-size:.7rem;color:var(--red)">✕</button></td>
                   </tr>
                 `)}
               </tbody>
@@ -2617,6 +2777,7 @@ const CanMapping = () => {
             `}
           `;
         })()}
+        <${Gate} need="operator">
         <h3 class="underline">New mappings</h3>
         <table style="width:auto;table-layout:auto">
           <thead><tr><th style="min-width:110px">Spot Value</th><th>TX/RX</th><th style="min-width:60px">CAN ID</th><th style="min-width:50px">Offset</th><th style="min-width:50px">Length</th><th style="min-width:50px">Gain</th><th></th></tr></thead>
@@ -2675,6 +2836,7 @@ const CanMapping = () => {
             ${virtMsg && html`<span style="font-size:.78rem;color:var(--green)">${virtMsg}</span>`}
           </div>
         `}
+        </${Gate}>
       </div>
     </div>
   `;
@@ -2688,6 +2850,7 @@ const Files = () => {
     <div id="files" class="tabdiv main-content" style="display:flex">
       <div class="main-right">
         <h3 class="underline">Actions</h3>
+        <${Gate} need="operator">
         <form enctype="multipart/form-data">
           <input id="updatefile2" name="updatefile" type="file" hidden onchange=${async e => {
             const fd = new FormData(e.target.form);
@@ -2696,6 +2859,7 @@ const Files = () => {
           }} />
           <label class="butt" for="updatefile2"><${Icon} n="upload" />Upload file</label>
         </form>
+        </${Gate}>
       </div>
       <div class="main-left">
         <h2>Files</h2>
@@ -2706,7 +2870,7 @@ const Files = () => {
               <tr key=${f.name}>
                 <td>${f.name}</td>
                 <td>${f.size}</td>
-                <td><button onclick=${async () => { await api.deleteFile(f.name); dispatch({ type: 'SET_FILE_LIST', payload: await api.getFileList() }); }}>Delete</button></td>
+                <td><button disabled=${!can('operator')} onclick=${async () => { await api.deleteFile(f.name); dispatch({ type: 'SET_FILE_LIST', payload: await api.getFileList() }); }}>Delete</button></td>
               </tr>
             `)}
           </tbody>
@@ -2788,6 +2952,7 @@ const uiPrefsReady = fetch('/uiprefs.json').then(r => r.ok ? r.json() : null).th
 // Debounced (the colour picker fires per mouse-move) write-back to the ESP
 let _uiPrefsTimer;
 function saveUiPrefsToDevice() {
+  if (!can('operator')) return; // viewers: appearance stays per browser
   clearTimeout(_uiPrefsTimer);
   _uiPrefsTimer = setTimeout(() => {
     const blob = new Blob([JSON.stringify({ theme: getTheme(), accentColor: getAccent() || '', dashMetrics: getDashMetrics(), updateCheck: getUpdateCheckAuto(), updateChannel: getUpdateChannel() })], { type: 'application/json' });
@@ -2962,6 +3127,213 @@ const UART_BOARD_PRESETS = [
   { id: 'esp32-uart0', name: 'ESP32 default UART0 (TX1 / RX3)', arch: 'esp32', rx: 3, tx: 1 },
 ];
 
+// ==================== Users & access (Settings) ====================
+// Sign-in off: explain it and offer the first (admin) account, which turns
+// it on. Sign-in on: your account (password, sign out) for everyone, the
+// user list for admins.
+
+const PasswordFields = ({ prefix, pw, setPw, pw2, setPw2, label = 'Password' }) => html`
+  <label class="auth-field">${label}
+    <input id=${prefix + '-pw'} type="password" autocomplete="new-password" value=${pw} oninput=${e => setPw(e.target.value)} />
+  </label>
+  <label class="auth-field">Confirm ${label.toLowerCase()}
+    <input id=${prefix + '-pw2'} type="password" autocomplete="new-password" value=${pw2} oninput=${e => setPw2(e.target.value)} />
+  </label>`;
+
+function passwordProblem(pw, pw2) {
+  if (pw.length < AUTH.passwordMin) return 'Use at least ' + AUTH.passwordMin + ' characters.';
+  if (pw !== pw2) return 'The passwords don\'t match.';
+  return '';
+}
+
+const RoleSelect = ({ id, value, onChange, disabled }) => html`
+  <select id=${id} class="styled" value=${value} disabled=${disabled} onchange=${e => onChange(e.target.value)}>
+    ${['viewer', 'operator', 'admin'].map(r => html`<option value=${r}>${ROLE_LABEL[r]}</option>`)}
+  </select>`;
+
+const RoleGuide = () => html`
+  <ul class="role-guide">
+    ${['viewer', 'operator', 'admin'].map(r => html`<li key=${r}><b>${ROLE_LABEL[r]}</b> — ${ROLE_HELP[r]}</li>`)}
+  </ul>`;
+
+const FirstAdminCard = () => {
+  const [name, setName] = useState('');
+  const [pw, setPw] = useState('');
+  const [pw2, setPw2] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const create = async () => {
+    const problem = !name.trim() ? 'Choose a user name.' : passwordProblem(pw, pw2);
+    if (problem) { setErr(problem); return; }
+    setBusy(true); setErr('');
+    try {
+      await authPost('/auth/users', { op: 'add', user: name.trim().toLowerCase(), password: pw, role: 'admin' });
+      location.reload(); // signed in as the new admin; every page now needs sign-in
+    } catch (e) { setErr(e.message); setBusy(false); }
+  };
+  return html`
+    <div class="dash-box compact" id="users-setup">
+      <h3>Users & access</h3>
+      <p class="auth-lead">Sign-in is <b>off</b>: anyone who can reach this module can view and change everything,
+        exactly as before. Create an admin account to require sign-in — then add read-only or operator accounts for others.</p>
+      <${RoleGuide} />
+      <p class="settings-subhead">Create the first admin</p>
+      <div class="auth-form">
+        <label class="auth-field">User name
+          <input id="setup-user" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32"
+            value=${name} oninput=${e => setName(e.target.value)} placeholder="e.g. admin" />
+        </label>
+        <${PasswordFields} prefix="setup" pw=${pw} setPw=${setPw} pw2=${pw2} setPw2=${setPw2} />
+        ${err && html`<p class="auth-err" role="alert">${err}</p>`}
+        <button id="setup-create" class="primary" onclick=${create} disabled=${busy}><${Icon} n="check" />${busy ? 'Creating…' : 'Create admin and turn on sign-in'}</button>
+      </div>
+      <p class="auth-hint">Forgot the password later? Hold the board's BOOT button for 10 seconds (or type <code>auth reset</code>
+        on its serial port) to delete all users and turn sign-in off again. Passwords are stored hashed (PBKDF2), never in plain text.
+        The connection is plain HTTP, so use this on a network you trust.</p>
+    </div>`;
+};
+
+const MyAccountCard = () => {
+  const [oldPw, setOldPw] = useState('');
+  const [pw, setPw] = useState('');
+  const [pw2, setPw2] = useState('');
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+  const change = async () => {
+    const problem = passwordProblem(pw, pw2);
+    if (problem) { setErr(problem); return; }
+    setErr(''); setMsg('');
+    try {
+      await authPost('/auth/password', { old: oldPw, new: pw });
+      setOldPw(''); setPw(''); setPw2('');
+      setMsg('Password changed — your other sessions were signed out.');
+    } catch (e) { setErr(e.status === 429 ? 'Too many attempts — try again in a few minutes.' : e.message); }
+  };
+  return html`
+    <div class="dash-box compact" id="my-account">
+      <h3>Your account</h3>
+      <div class="me-row">
+        <span class="user-avatar lg">${(AUTH.user || '?').slice(0, 2).toUpperCase()}</span>
+        <div style="flex:1;min-width:0">
+          <div class="me-name">${AUTH.user}</div>
+          <span class="role-pill role-${AUTH.role}">${ROLE_LABEL[AUTH.role] || AUTH.role}</span>
+        </div>
+        <button id="settings-signout" onclick=${authSignOut}><${Icon} n="logout" />Sign out</button>
+      </div>
+      <p class="auth-lead">${ROLE_HELP[AUTH.role] || ''}.</p>
+      <p class="settings-subhead">Change password</p>
+      <div class="auth-form">
+        <label class="auth-field">Current password
+          <input id="me-old" type="password" autocomplete="current-password" value=${oldPw} oninput=${e => setOldPw(e.target.value)} />
+        </label>
+        <${PasswordFields} prefix="me" pw=${pw} setPw=${setPw} pw2=${pw2} setPw2=${setPw2} label="New password" />
+        ${err && html`<p class="auth-err" role="alert">${err}</p>`}
+        ${msg && html`<p class="auth-ok" role="status">${msg}</p>`}
+        <button id="me-change" onclick=${change}><${Icon} n="save" />Change password</button>
+      </div>
+    </div>`;
+};
+
+const UserListCard = () => {
+  const [users, setUsers] = useState(null);
+  const [max, setMax] = useState(8);
+  const [err, setErr] = useState('');
+  const [resetFor, setResetFor] = useState(null);
+  const [rpw, setRpw] = useState('');
+  const [rpw2, setRpw2] = useState('');
+  const [nu, setNu] = useState({ name: '', role: 'viewer' });
+  const [npw, setNpw] = useState('');
+  const [npw2, setNpw2] = useState('');
+  const load = async () => {
+    try {
+      const r = await fetch('/auth/users');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      setUsers(d.users || []);
+      if (d.max) setMax(d.max);
+    } catch (e) { setErr('Could not load users: ' + e.message); }
+  };
+  useEffect(() => { load(); }, []);
+  const op = async (fields, okMsg) => {
+    setErr('');
+    try {
+      await authPost('/auth/users', fields);
+      if (okMsg) showToast(okMsg, 'ok');
+      await load();
+      return true;
+    } catch (e) { setErr(e.message); await load(); return false; }
+  };
+  const add = async () => {
+    const problem = !nu.name.trim() ? 'Choose a user name.' : passwordProblem(npw, npw2);
+    if (problem) { setErr(problem); return; }
+    if (await op({ op: 'add', user: nu.name.trim().toLowerCase(), password: npw, role: nu.role }, nu.name.trim().toLowerCase() + ' added')) {
+      setNu({ name: '', role: 'viewer' }); setNpw(''); setNpw2('');
+    }
+  };
+  const resetPw = async () => {
+    const problem = passwordProblem(rpw, rpw2);
+    if (problem) { setErr(problem); return; }
+    if (await op({ op: 'password', user: resetFor, password: rpw }, 'Password set for ' + resetFor + ' — their sessions were signed out')) {
+      setResetFor(null); setRpw(''); setRpw2('');
+    }
+  };
+  return html`
+    <div class="dash-box compact" id="user-list">
+      <h3>Users</h3>
+      <p class="auth-lead">Changing a role or password, or removing a user, signs that user out everywhere.</p>
+      ${err && html`<p class="auth-err" role="alert">${err}</p>`}
+      ${users === null ? html`<${Spinner} />` : html`
+        <ul class="user-rows">
+          ${users.map(u => html`
+            <li class="user-row" key=${u.name} data-user=${u.name}>
+              <span class="user-avatar">${u.name.slice(0, 2).toUpperCase()}</span>
+              <span class="user-name">${u.name}${u.name === AUTH.user ? html` <span class="you">(you)</span>` : ''}</span>
+              <${RoleSelect} id=${'role-' + u.name} value=${u.role} disabled=${u.name === AUTH.user}
+                onChange=${role => op({ op: 'role', user: u.name, role }, u.name + ' is now ' + ROLE_LABEL[role])} />
+              <div class="user-actions">
+                <button onclick=${() => { setResetFor(u.name); setRpw(''); setRpw2(''); }}><${Icon} n="edit" size=${11} />Password</button>
+                ${u.name !== AUTH.user && html`<button class="danger" onclick=${() => {
+                  if (confirm('Remove ' + u.name + '? They are signed out at once.')) op({ op: 'remove', user: u.name }, u.name + ' removed');
+                }}><${Icon} n="trash" size=${11} />Remove</button>`}
+              </div>
+            </li>`)}
+        </ul>
+      `}
+      ${users && users.length < max ? html`
+        <p class="settings-subhead">Add a user</p>
+        <div class="auth-form">
+          <label class="auth-field">User name
+            <input id="new-user" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32"
+              value=${nu.name} oninput=${e => setNu({ ...nu, name: e.target.value })} />
+          </label>
+          <label class="auth-field">Role <${RoleSelect} id="new-role" value=${nu.role} onChange=${role => setNu({ ...nu, role })} /></label>
+          <${PasswordFields} prefix="new" pw=${npw} setPw=${setNpw} pw2=${npw2} setPw2=${setNpw2} />
+          <button id="new-add" class="primary" onclick=${add}><${Icon} n="plus" />Add user</button>
+        </div>
+        <${RoleGuide} />
+      ` : users && html`<p class="auth-hint">${max} users is the most this module keeps.</p>`}
+      ${resetFor && html`
+        <${Modal} id="reset-pw" title=${'New password for ' + resetFor} onClose=${() => setResetFor(null)}>
+          <div class="auth-form">
+            <${PasswordFields} prefix="reset" pw=${rpw} setPw=${setRpw} pw2=${rpw2} setPw2=${setRpw2} label="New password" />
+            ${err && html`<p class="auth-err" role="alert">${err}</p>`}
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button onclick=${() => setResetFor(null)}>Cancel</button>
+              <button id="reset-save" class="primary" onclick=${resetPw}><${Icon} n="save" />Set password</button>
+            </div>
+          </div>
+        </${Modal}>`}
+    </div>`;
+};
+
+const UsersPanel = () => {
+  if (!AUTH.enabled) return html`<${FirstAdminCard} />`;
+  return html`
+    <${MyAccountCard} />
+    ${can('admin') ? html`<${UserListCard} />` : html`
+      <div class="dash-box compact"><h3>Users</h3><p class="auth-lead">Only an admin can add or change users.</p></div>`}`;
+};
+
 const Settings = () => {
   const { state, dispatch } = useContext(Store);
   const [uartRxPin, setUartRxPin] = useState(1); // configurable UART pins (default GPIO1/3)
@@ -3089,7 +3461,7 @@ const Settings = () => {
   // deep-linkable as #settings/device|web|config
   const [subTab, setSubTab] = useState(() => {
     const s = parseHash().sub;
-    return (s === 'web' || s === 'config') ? s : 'device';
+    return (s === 'web' || s === 'config' || s === 'users') ? s : 'device';
   });
   const pickSubTab = (s) => {
     setSubTab(s);
@@ -3144,8 +3516,8 @@ const Settings = () => {
           });
         }
       } catch (e) { /* use default */ }
-      // Load WiFi info
-      try {
+      // Load WiFi info (an admin's: the device refuses it to others)
+      if (can('admin')) try {
         const r = await fetch('/wifi');
         if (r.ok) {
           const html = await r.text();
@@ -3211,12 +3583,15 @@ const Settings = () => {
     <div id="settings" class="tabdiv main-content" style="display:flex">
       <div class="main-left">
         <h2>Settings</h2>
-        <div id="settings-subtabs" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:.75rem">
+        <div id="settings-subtabs" class="seg" style="margin-bottom:.75rem">
           <button class="page-pill ${subTab === 'device' ? 'active' : ''}" onclick=${() => pickSubTab('device')}>Device & Connection</button>
           <button class="page-pill ${subTab === 'web' ? 'active' : ''}" onclick=${() => pickSubTab('web')}>Web Interface</button>
           <button class="page-pill ${subTab === 'config' ? 'active' : ''}" onclick=${() => pickSubTab('config')}>Configuration</button>
+          <button id="settings-users-tab" class="page-pill ${subTab === 'users' ? 'active' : ''}" onclick=${() => pickSubTab('users')}>Users & Access</button>
         </div>
-        <div class="settings-grid">
+        ${subTab === 'device' && !can('admin') && html`<p class="perm-note" id="settings-perm-note">Device settings are read-only for your account — changing them needs an <b>admin</b>.</p>`}
+        <div class="settings-grid" inert=${(subTab === 'device' && !can('admin')) || undefined}>
+        ${subTab === 'users' && html`<${UsersPanel} />`}
         ${subTab === 'device' && html`
 
         <div class="dash-box compact">
@@ -3496,8 +3871,10 @@ const Settings = () => {
           <p style="font-size:.8rem;margin:0 0 .5rem">Back up or restore favourites, gauge pages, presets, plot layouts and UI preferences as a single file.</p>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button onclick=${exportUiSettings} style="width:auto"><${Icon} n="download" />Export settings</button>
+            <${Gate} need="operator">
             <input id="ui-settings-import" type="file" hidden onchange=${importUiSettings} />
             <label class="butt" for="ui-settings-import" style="width:auto"><${Icon} n="upload" />Import settings</label>
+            </${Gate}>
           </div>
         </div>
 
@@ -3508,12 +3885,23 @@ const Settings = () => {
             <div class="preset-row" key=${item.key} style="flex-wrap:nowrap">
               <span class="preset-name" style="flex:1 1 auto">${item.label}</span>
               <button onclick=${() => exportSingle(item)} title=${'Download ' + item.file}><${Icon} n="download" size=${11} />Backup</button>
+              <${Gate} need="operator">
               <input id=${'single-import-' + item.key} type="file" hidden onchange=${e => importSingle(item, e)} />
               <label class="butt" for=${'single-import-' + item.key} title=${'Upload a ' + item.file + ' backup'}
                 style="width:auto;height:24px;padding:0 9px;font-size:.7rem;line-height:1;justify-content:center"><${Icon} n="upload" size=${11} />Restore</label>
+              </${Gate}>
             </div>
           `)}
           <p style="font-size:.72rem;color:var(--text3);margin:.35rem 0 0">Restoring replaces that file on the device and reloads the page.</p>
+        </div>
+
+        <div class="dash-box compact" id="reset-settings-box">
+          <h3>Reset Settings</h3>
+          <p style="font-size:.8rem;margin:0 0 .5rem">Device settings (UART/CAN pins, CAN node and speed, device name, SD and UI preferences) are kept when you update. Reset them to the defaults here; the device reboots.</p>
+          <${Gate} need="admin">
+          <button id="reset-settings" onclick=${resetDeviceSettings} style="width:auto"><${Icon} n="undo" />Reset device settings</button>
+          </${Gate}>
+          <p style="font-size:.72rem;color:var(--text3);margin:.35rem 0 0">User accounts, Wi-Fi and your gauge pages, plots, presets and favourites are not affected.</p>
         </div>
 
         `}
@@ -3847,6 +4235,58 @@ const tileFreeform = (type) => type !== 'radial' && type !== 'indicator' && type
 // Interactive tiles stream their PARAMETER for live state instead of a spot value
 const tileStreamName = (g) => g.name || ((g.type === 'toggle' || g.type === 'slider') ? g.param : '') || '';
 
+// Dashboard widgets: panel tiles on the same grid, in the same gauges.json
+// pages and the same editor as every gauge, so any tile can sit on the
+// Dashboard or on a gauge page (doc/REDESIGN.md, phase 3). The Dashboard tab
+// is simply the page gauges.json names as `dashboard`.
+const WIDGET_TYPES = new Set(['status', 'metric', 'messages', 'terminal', 'actions', 'cansend']);
+const NO_VALUE_TYPES = ['status', 'messages', 'terminal', 'actions', 'cansend'];
+const STATUS_NAMES = ['opmode', 'status', 'lasterr'];
+const statusFigs = (g) => (Array.isArray(g.figs) && g.figs.length ? g.figs : getDashMetrics());
+// Values a tile streams besides its own: the status tile follows the run
+// state and its figures (the global json poll is paused while a page streams)
+const tileExtraNames = (g) => g.type === 'status' ? [...STATUS_NAMES, ...statusFigs(g)] : [];
+const DASH_PAGE_ID = 'dash';
+const DASH_ACTIONS = [
+  { id: 'start', label: 'Start inverter in manual mode', icon: 'play', need: 'operator' },
+  { id: 'stop', label: 'Stop inverter', icon: 'stop', need: 'operator' },
+  { id: 'resetinv', label: 'Reboot Inverter', icon: 'rotate', need: 'operator' },
+  { id: 'reboot', label: 'Reboot ESP32', icon: 'power', need: 'admin' },
+];
+// The Dashboard as it was before widgets, rebuilt from tiles
+function defaultDashboardPage() {
+  return {
+    id: DASH_PAGE_ID, name: 'Dashboard', layout: 'stack', items: [
+      { type: 'status', x: 0, y: 0, w: 6, h: 3 },
+      { type: 'messages', x: 6, y: 0, w: 4, h: 3 },
+      { type: 'terminal', x: 0, y: 3, w: 10, h: 3 },
+      { type: 'actions', x: 0, y: 6, w: 10, h: 1 },
+      { type: 'cansend', x: 0, y: 7, w: 10, h: 2 },
+    ],
+  };
+}
+// gauges.json v4 names the Dashboard's page; layouts saved before that get
+// one, and there is always at least one gauge page besides it
+function withDashboardPage(pages, data) {
+  const want = data && data.dashboard;
+  let dash = want != null ? pages.find(p => String(p.id) === String(want)) : null;
+  let out = pages;
+  if (!dash) { dash = defaultDashboardPage(); out = [dash, ...pages]; }
+  if (!out.some(p => p.id !== dash.id)) {
+    const id = Math.max(0, ...out.map(p => (typeof p.id === 'number' ? p.id : 0))) + 1;
+    out = [...out, { id, name: 'Main', items: [] }];
+  }
+  return { pages: out, dashId: dash.id };
+}
+// Enum display for a raw number: exact match, else the set bits (bitfields)
+function enumText(v, enums) {
+  if (!enums) return fmtNum(v);
+  if (enums[v] != null) return String(enums[v]);
+  const parts = [];
+  for (const k in enums) if (Number(k) > 0 && (v & k)) parts.push(enums[k]);
+  return parts.length ? parts.join('|') : fmtNum(v, 0);
+}
+
 // A page condition ({ name, min, max, invert }) matches while the value sits
 // inside min..max INCLUSIVE — so equality is min = max (opmode 3..3 matches
 // only 3, not 2 or 4). A blank/missing bound is open-ended (min 500 alone =
@@ -3925,6 +4365,7 @@ function migrateGauges(data) {
         id: p.id || pi + 1,
         name: p.name || 'Page ' + (pi + 1),
         cond: (p.cond && p.cond.name) ? p.cond : undefined,
+        layout: p.layout === 'stack' ? 'stack' : undefined,
         items: (Array.isArray(p.items) ? p.items : []).map(g => {
           const type = g.type || 'radial';
           const floor = tileFloor(type);
@@ -4234,6 +4675,199 @@ const SliderTile = ({ g, value, editing, w, h }) => {
 // Fills the tile under the name label and measures itself with a
 // ResizeObserver, so gauges rescale live while a tile is being resized
 // (GridStack changes the DOM size continuously during the drag).
+// ==================== Dashboard widgets ====================
+
+// The run state: what the Dashboard's hero card always showed
+const StatusTile = ({ g, nameVals }) => {
+  const { state } = useContext(Store);
+  const sv = state.spotValues || {};
+  const live = (n) => (nameVals && typeof nameVals[n] === 'number' && !isNaN(nameVals[n])) ? nameVals[n]
+    : (sv[n] && typeof sv[n].value === 'number' ? sv[n].value : undefined);
+  const show = (n) => { const v = live(n); return v == null ? null : (sv[n] && sv[n].enums ? enumText(v, sv[n].enums) : fmtNum(v)); };
+  const figs = statusFigs(g);
+  const hist = useRef({});
+  figs.forEach(n => {
+    const v = live(n);
+    if (typeof v !== 'number' || isNaN(v)) return;
+    const a = hist.current[n] || (hist.current[n] = []);
+    if (a[a.length - 1] !== v) { a.push(v); if (a.length > 60) a.shift(); }
+  });
+  if (state.status == null && live('opmode') == null) return html`<${Spinner} />`;
+  const opmode = show('opmode') || state.opmode;
+  const offline = state.commError || (state.canMode && !state.canConnected);
+  const tone = offline ? 'danger' : opmodeTone(opmode);
+  const friendly = offline ? 'No connection to inverter'
+    : (OPMODE_FRIENDLY[opmode] || String(opmode == null ? '—' : opmode));
+  const lasterr = show('lasterr') || state.lasterr;
+  const hasErr = lasterr && String(lasterr) !== 'NONE' && String(lasterr) !== '0';
+  return html`
+    <div class="hero-top">
+      <span class="pill ${tone}"><span class="dot"></span>${offline ? 'Offline' : opmode}</span>
+      ${hasErr && html`<span class="pill warn">⚠ ${lasterr}</span>`}
+      ${state.canMode
+        ? html`<span class="pill ${state.canConnected ? 'info' : 'danger'}">CAN #${state.canActiveNodeId}</span>`
+        : html`<span class="pill ${offline ? 'danger' : 'info'}">UART</span>`}
+    </div>
+    <div class="hero-state">${friendly}</div>
+    <p class="hero-sub">Status: ${show('status') || state.status}</p>
+    <div class="hero-metrics">
+      ${figs.map((name, idx) => {
+        const s1 = sv[name];
+        const unit = (s1 && s1.unit && s1.unit.indexOf('=') === -1) ? s1.unit : '';
+        return html`
+        <div class="metric ${idx === 1 ? 'tone-active' : ''}" key=${name}>
+          <span class="metric-label">${DASH_METRIC_LABELS[name] || name}</span>
+          <span class="metric-value">${show(name) || '—'}${unit && html`<span class="metric-unit">${unit}</span>`}</span>
+          <${Sparkline} data=${(hist.current[name] || []).slice()} />
+        </div>`;
+      })}
+      ${state.firmwareVersion && html`
+        <div class="metric">
+          <span class="metric-label">Firmware</span>
+          <span class="metric-value" style="font-size:1.05rem;line-height:1.4;margin-top:6px">${state.firmwareVersion}</span>
+        </div>`}
+    </div>`;
+};
+
+// One value with its unit and a sparkline of the last minute or so
+const MetricTile = ({ g, value, unit, enums }) => {
+  const hist = useRef([]);
+  if (typeof value === 'number' && !isNaN(value)) {
+    const a = hist.current;
+    if (a[a.length - 1] !== value) { a.push(value); if (a.length > 60) a.shift(); }
+  }
+  const label = g.label || DASH_METRIC_LABELS[g.name] || g.name || 'tap to set up';
+  const shown = value == null || isNaN(value) ? '—'
+    : (enums ? enumText(value, enums) : fmtNum(value, g.decimals != null ? g.decimals : 1));
+  return html`
+    <div class="metric widget-metric">
+      <span class="metric-label">${label}</span>
+      <span class="metric-value">${shown}${unit && html`<span class="metric-unit">${unit}</span>`}</span>
+      ${g.spark !== false && html`<${Sparkline} data=${hist.current.slice()} width=${160} height=${30} />`}
+    </div>`;
+};
+
+// Inverter messages, refreshed while the tile is on screen
+const MessagesTile = ({ editing }) => {
+  const { state, dispatch } = useContext(Store);
+  // On the Dashboard the global poll already fetches 'errors'
+  const own = state.activeTab !== 'dashboard';
+  useEffect(() => {
+    if (editing || !own) return;
+    let alive = true, timer;
+    const tick = async () => {
+      try { const r = await api.getText('errors'); if (alive) dispatch({ type: 'SET_MESSAGES', payload: r }); } catch (e) {}
+      if (alive) timer = setTimeout(tick, 4000);
+    };
+    tick();
+    return () => { alive = false; clearTimeout(timer); };
+  }, [editing, own]);
+  return html`<h3>Inverter messages</h3><pre class="widget-pre"><div>${state.messages}</div></pre>`;
+};
+
+// The command terminal
+const TerminalTile = () => {
+  const { dispatch } = useContext(Store);
+  const [cmd, setCmd] = useState('');
+  const [out, setOut] = useState('');
+  const send = async () => {
+    const c = cmd.trim();
+    if (!c) return;
+    setOut(o => o + '> ' + c + '\n'); // echo the outgoing command
+    setCmd('');
+    dispatch({ type: 'SET_LOGGING', payload: true }); // pause the json poll so it can't contend for the single UART
+    dispatch({ type: 'SET_CMD_BUSY', payload: true });
+    try {
+      // Generous timeout: a silent inverter returns empty in ~0.2s; this only
+      // catches a hung ESP/connection and must clear a slow 'json' (~4s)
+      const reply = await api.getText(c, 0, 15000);
+      const text = reply.replace(/\s+$/, '');
+      setOut(o => o + (text ? text : '(no response)') + '\n');
+    } catch (e) {
+      const msg = (e && e.name === 'AbortError') ? 'timed out — no response' : (e.message || 'request failed');
+      setOut(o => o + 'error: ' + msg + '\n');
+    } finally {
+      dispatch({ type: 'SET_LOGGING', payload: false });
+      dispatch({ type: 'SET_CMD_BUSY', payload: false });
+    }
+  };
+  return html`
+    <h3>Command</h3>
+    <div id="commandoutput">${out}</div>
+    <div style="display:flex;gap:6px">
+      <input type="text" id="commandinput" aria-label="Command" value=${cmd} oninput=${e => setCmd(e.target.value)} onkeyup=${e => e.keyCode === 13 && send()} style="flex:1;min-width:0" />
+      <button onclick=${send} style="padding:8px 18px;font-weight:600;width:auto"><${Icon} n="send" />Send</button>
+    </div>`;
+};
+
+// Start/stop and reboot buttons
+const ActionsTile = ({ g }) => {
+  const { dispatch } = useContext(Store);
+  const [confirmAction, setConfirmAction] = useState(null); // 'inverter' | 'esp32'
+  const want = Array.isArray(g.btns) && g.btns.length ? g.btns : DASH_ACTIONS.map(a => a.id);
+  const run = (id) => {
+    if (id === 'start') api.getText('start 2').then(r => dispatch({ type: 'SET_MESSAGES', payload: r }));
+    else if (id === 'stop') api.getText('stop').then(r => dispatch({ type: 'SET_MESSAGES', payload: r }));
+    else setConfirmAction(id === 'resetinv' ? 'inverter' : 'esp32');
+  };
+  return html`
+    <div class="widget-actions">
+      ${DASH_ACTIONS.filter(a => want.includes(a.id)).map(a => html`
+        <${Gate} need=${a.need} key=${a.id}><button class=${a.id === 'reboot' ? 'danger' : ''} onclick=${() => run(a.id)}><${Icon} n=${a.icon} />${a.label}</button></${Gate}>`)}
+    </div>
+    ${confirmAction && html`
+      <${Modal} id="reset-modal" title=${confirmAction === 'inverter' ? 'Reset inverter' : 'Reboot ESP32'} onClose=${() => setConfirmAction(null)}>
+        <p>${confirmAction === 'inverter'
+          ? 'This will send a reset command to the inverter (STM32). The inverter will reboot. The web interface will remain accessible.'
+          : 'This will reboot the ESP32 itself. You will temporarily lose connection to the web interface.'}</p>
+        <div style="display:flex;gap:8px;margin-top:1rem">
+          <button onclick=${() => setConfirmAction(null)}>Cancel</button>
+          <button onclick=${async () => {
+            const which = confirmAction;
+            setConfirmAction(null);
+            await fetch(which === 'inverter' ? '/reset-inverter' : '/reboot');
+          }} style="background:var(--red);color:#fff;border-color:transparent">Confirm</button>
+        </div>
+      </${Modal}>`}`;
+};
+
+// Raw CAN frame sender (CAN mode)
+const CanSendTile = () => {
+  const { state } = useContext(Store);
+  const [canId, setCanId] = useState('0x180');
+  const [canData, setCanData] = useState('00 00 00 00 00 00 00 00');
+  const [result, setResult] = useState('');
+  if (!state.canMode) return html`<h3>CAN Message</h3><p class="widget-note">Sends a raw CAN frame. Available in CAN mode.</p>`;
+  return html`
+    <h3>CAN Message</h3>
+    <${Gate} need="operator">
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+      <label style="font-size:.75rem;flex:1;min-width:7em">CAN ID (hex)
+        <input type="text" value=${canId} oninput=${e => setCanId(e.target.value)} style="width:100%;font-size:.75rem;padding:4px 6px;font-family:var(--mono)" />
+      </label>
+      <label style="font-size:.75rem;flex:2;min-width:12em">Data bytes (hex, space/comma separated)
+        <input type="text" value=${canData} oninput=${e => setCanData(e.target.value)} style="width:100%;font-size:.75rem;padding:4px 6px;font-family:var(--mono)" />
+      </label>
+      <button onclick=${async () => {
+        const r = await fetch('/can-send?canId=' + encodeURIComponent(canId) + '&data=' + encodeURIComponent(canData));
+        setResult(JSON.stringify(await r.json()));
+      }} style="font-size:.75rem;padding:6px 14px;white-space:nowrap;width:auto"><${Icon} n="send" />Send</button>
+    </div>
+    </${Gate}>
+    ${result && html`<p class="widget-note" style="font-family:var(--mono)">${result}</p>`}`;
+};
+
+// While editing, a widget is inert: a tap configures it instead of firing it
+const WidgetTile = ({ g, value, unit, enums, nameVals, editing }) => html`
+  <div class="widget-body wt-${g.type}" inert=${editing || undefined}>
+    ${g.type === 'status' ? html`<${StatusTile} g=${g} nameVals=${nameVals} />`
+      : g.type === 'metric' ? html`<${MetricTile} g=${g} value=${value} unit=${unit} enums=${enums} />`
+      : g.type === 'messages' ? html`<${MessagesTile} editing=${editing} />`
+      : g.type === 'terminal' ? html`<${TerminalTile} />`
+      : g.type === 'actions' ? html`<${ActionsTile} g=${g} />`
+      : html`<${CanSendTile} />`}
+  </div>`;
+
 const GaugeTileBody = ({ g, title, value, value2, unit, enums, editing, canMode, presets, peaks }) => {
   const ref = useRef(null);
   const [dim, setDim] = useState({ w: 0, h: 0 });
@@ -4312,16 +4946,16 @@ const GaugeTileBody = ({ g, title, value, value2, unit, enums, editing, canMode,
         ? html`<${TextTile} value=${value} unit=${unit} enums=${enums} text=${g.text || ''}
             decimals=${g.decimals != null ? g.decimals : 1} w=${w - 6} h=${gh - (gh < 20 ? 0 : 4)} />`
         : (g.type === 'action')
-        ? html`<${ActionTile} g=${g} canMode=${canMode} editing=${editing} presets=${presets} w=${w - 10} h=${gh - 8} />`
+        ? html`<${Gate} need="operator"><${ActionTile} g=${g} canMode=${canMode} editing=${editing} presets=${presets} w=${w - 10} h=${gh - 8} /></${Gate}>`
         : (g.type === 'bar')
         ? html`<${BarGauge} value=${value} unit=${unit} enums=${enums} color=${g.color || ''}
             decimals=${g.decimals != null ? g.decimals : 1} min=${g.min != null ? g.min : 0}
             max=${(g.max == null || g.max === 0) ? 4000 : g.max} w=${w - 8} h=${gh - 4}
             warn=${g.warn} warnColor=${g.warnColor} center=${g.center} invertScale=${!!g.invertScale} peaks=${peaks} revColor=${g.revColor || ''} />`
         : (g.type === 'toggle')
-        ? html`<${ToggleTile} g=${g} value=${value} canMode=${canMode} editing=${editing} px=${Math.max(20, Math.min(w, gh) - 4)} />`
+        ? html`<${Gate} need="operator"><${ToggleTile} g=${g} value=${value} canMode=${canMode} editing=${editing} px=${Math.max(20, Math.min(w, gh) - 4)} /></${Gate}>`
         : (g.type === 'slider')
-        ? html`<${SliderTile} g=${g} value=${value} editing=${editing} w=${w - 18} h=${gh - 4} />`
+        ? html`<${Gate} need="operator"><${SliderTile} g=${g} value=${value} editing=${editing} w=${w - 18} h=${gh - 4} /></${Gate}>`
         : html`<${SvgGauge} id=${g.id} value=${value} unit=${unit} color=${g.color || ''} enums=${enums}
             px=${Math.max(40, Math.min(w, gh) - 4)} decimals=${g.decimals != null ? g.decimals : 1}
             min=${g.min != null ? g.min : 0} max=${(g.max == null || g.max === 0) ? 4000 : g.max}
@@ -4365,10 +4999,21 @@ const RecChart = ({ rec }) => {
   return html`<div style="height:300px"><canvas ref=${canvasRef}></canvas></div>`;
 };
 
-const Gauges = () => {
+// Gauge pages, and (dash) the Dashboard: the same grid, editor and
+// gauges.json, showing the page the file names as `dashboard`
+const Gauges = ({ dash = false }) => {
   const { state, dispatch } = useContext(Store);
-  const [pages, setPages] = useState([{ id: 1, name: 'Main', items: [] }]);
-  const [activePage, setActivePage] = useState(1);
+  const [pages, setPages] = useState(() => [{ ...defaultDashboardPage(), items: [] }, { id: 1, name: 'Main', items: [] }]);
+  const [dashId, setDashId] = useState(DASH_PAGE_ID);
+  const [activePage, setActivePage] = useState(dash ? DASH_PAGE_ID : 1);
+  const [nameVals, setNameVals] = useState({}); // latest streamed value per name (status tiles)
+  const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 599px)').matches);
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 599px)');
+    const on = () => setNarrow(mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
   const [lineVals, setLineVals] = useState({});
   const [editing, setEditing] = useState(false);
   const [editActionsOpen, setEditActionsOpen] = useState(false); // responsive-only expander for the editor's page/condition/starter sections
@@ -4442,8 +5087,14 @@ const Gauges = () => {
   const activeRef = useRef(activePage);
   activeRef.current = activePage;
 
-  const page = pages.find(p => p.id === activePage) || pages[0];
+  // The Dashboard tab shows only its page; the Gauges tab every other page
+  const shownPages = pages.filter(p => (dash ? p.id === dashId : p.id !== dashId));
+  const page = pages.find(p => p.id === activePage) || shownPages[0] || pages[0];
   const items = page.items;
+  // On phones a 'stack' page lists its tiles in reading order
+  const stacked = page.layout === 'stack' && narrow && !editing;
+  const stackRef = useRef(false);
+  stackRef.current = page.layout === 'stack';
   const itemsRef = useRef(items);
   itemsRef.current = items;
   const pagesRef = useRef(pages);
@@ -4456,14 +5107,14 @@ const Gauges = () => {
   // Waits for the layout fetch so it can't clobber a deep link with the
   // placeholder page, and so it runs again once the real pages are in.
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || dash) return;
     if (!/^#gauges(\/|$)/.test(location.hash)) return;
     history.replaceState(null, '', '#gauges/' + encodeURIComponent(page.name));
   }, [loaded, activePage, page.name]);
   useEffect(() => {
     const onHash = () => {
       const { tab, sub } = parseHash();
-      if (tab !== 'gauges' || !sub) return;
+      if (dash || tab !== 'gauges' || !sub) return;
       const want = sub.trim().toLowerCase();
       const p = pagesRef.current.find(x =>
         String(x.id) === want || String(x.name).trim().toLowerCase() === want);
@@ -4476,33 +5127,39 @@ const Gauges = () => {
   // Load saved layout (migrating v1 if needed) and fetch spot names for the picker
   useEffect(() => {
     (async () => {
+      let data = null;
       try {
         const r = await fetch('/gauges.json');
-        if (r.ok) {
-          const data = await r.json();
-          const migrated = migrateGauges(data);
-          let maxId = 0;
-          migrated.forEach(p => p.items.forEach(g => { if (typeof g.id === 'number' && g.id > maxId) maxId = g.id; }));
-          migrated.forEach(p => p.items.forEach(g => { if (!g.id) g.id = ++maxId; }));
-          nextId.current = maxId + 1;
-          setPages(migrated);
-          // Deep link: #gauges/<page name> (or page id) opens that page —
-          // lets a browser favourite target e.g. the Driving layout directly
-          const want = initialSubRef.current.trim().toLowerCase();
-          const linked = want && migrated.find(p =>
-            String(p.id) === want || String(p.name).trim().toLowerCase() === want);
-          setActivePage((linked || migrated[0]).id);
-          if (data && data.autoPage === false) setAutoPage(false);
-        }
+        if (r.ok) data = await r.json();
       } catch (e) { /* no saved layout */ }
+      const { pages: all, dashId: did } = withDashboardPage(migrateGauges(data), data);
+      let maxId = 0;
+      all.forEach(p => p.items.forEach(g => { if (typeof g.id === 'number' && g.id > maxId) maxId = g.id; }));
+      all.forEach(p => p.items.forEach(g => { if (!g.id) g.id = ++maxId; }));
+      nextId.current = maxId + 1;
+      setPages(all);
+      setDashId(did);
+      if (dash) {
+        setActivePage(did);
+      } else {
+        // Deep link: #gauges/<page name> (or page id) opens that page —
+        // lets a browser favourite target e.g. the Driving layout directly
+        const gaugePages = all.filter(p => p.id !== did);
+        const want = initialSubRef.current.trim().toLowerCase();
+        const linked = want && gaugePages.find(p =>
+          String(p.id) === want || String(p.name).trim().toLowerCase() === want);
+        setActivePage((linked || gaugePages[0]).id);
+      }
+      if (data && data.autoPage === false) setAutoPage(false);
       setLoaded(true);
       api.getJSON('json').then(json => dispatch({ type: 'SET_PARAMS', payload: json })).catch(() => {});
     })();
   }, []);
 
   const persist = async (nextPages, auto = autoPage) => {
+    if (!can('operator')) return;
     try {
-      const blob = new Blob([JSON.stringify({ v: 3, autoPage: auto, pages: nextPages })], { type: 'application/json' });
+      const blob = new Blob([JSON.stringify({ v: 4, autoPage: auto, dashboard: dashId, pages: nextPages })], { type: 'application/json' });
       const fd = new FormData();
       fd.append('updatefile', blob, 'gauges.json');
       await fetch('/edit', { method: 'POST', body: fd });
@@ -4543,7 +5200,10 @@ const Gauges = () => {
       if (!(availW > 0)) return 1;
       let cell = availW / GRID_COLS;
       const rows = itemsRef.current.reduce((m, g) => Math.max(m, (g.y || 0) + (g.h || 1)), 0);
-      if (rows > 0) {
+      // A 'stack' page (the Dashboard) reads like a page and scrolls; only
+      // gauge pages shrink to fit the screen height, and not on phones,
+      // where the top and bottom bars leave too little height for it
+      if (rows > 0 && !stackRef.current && window.innerWidth >= 600) {
         const availH = window.innerHeight - el.getBoundingClientRect().top - 8;
         const capCell = (availH - MARGIN * (rows + 1)) / rows;
         if (capCell > 30 && capCell < cell) cell = capCell; // floor ~30px/cell
@@ -4640,7 +5300,7 @@ const Gauges = () => {
     };
     // types join: a type switch (e.g. radial -> indicator) changes the
     // engine minimums, so re-init to reapply them
-  }, [activePage, layoutGen, items.length, editing, pages.length, items.map(g => g.type).join()]);
+  }, [activePage, layoutGen, items.length, editing, pages.length, items.map(g => g.type).join(), stacked]);
 
   // Enter edit mode, snapshotting the layout so Cancel can restore it
   const startEditing = () => {
@@ -4712,6 +5372,16 @@ const Gauges = () => {
     });
   };
 
+  const moveTileToPage = (id, targetId) => {
+    const target = pages.find(p => String(p.id) === String(targetId));
+    const tile = items.find(g => g.id === id);
+    if (!target || !tile || target.id === activePage) return;
+    const y = target.items.reduce((m, g) => Math.max(m, (g.y || 0) + (g.h || 3)), 0);
+    setPages(ps => ps.map(p => p.id === activePage ? { ...p, items: p.items.filter(g => g.id !== id) }
+      : p.id === target.id ? { ...p, items: [...p.items, { ...tile, x: 0, y }] } : p));
+    setConfigId(null);
+  };
+
   const updateGaugeConfig = (id, field, value) =>
     setPageItems(activePage, prev => prev.map(g => g.id !== id ? g : { ...g, [field]: value }));
 
@@ -4722,19 +5392,19 @@ const Gauges = () => {
   // scroll or a tap never triggers it. Text selection during a drag is
   // suppressed in CSS (.main-left user-select:none in view mode).
   const switchPageBy = (delta) => {
-    const idx = pages.findIndex(p => p.id === activePage);
+    const idx = shownPages.findIndex(p => p.id === activePage);
     const ni = idx + delta;
-    if (ni >= 0 && ni < pages.length) setActivePage(pages[ni].id);
+    if (ni >= 0 && ni < shownPages.length) setActivePage(shownPages[ni].id);
   };
   const hasPageInDir = (dir) => {
-    const idx = pages.findIndex(p => p.id === activePage);
-    return idx + dir >= 0 && idx + dir < pages.length;
+    const idx = shownPages.findIndex(p => p.id === activePage);
+    return idx + dir >= 0 && idx + dir < shownPages.length;
   };
   const clearSwipeHint = () => { const el = swipeHintRef.current; if (el) el.style.opacity = 0; };
   const onSwipeStart = (e) => {
     swipeRef.current = null;
     clearSwipeHint();
-    if (editing || pages.length < 2) return;
+    if (editing || shownPages.length < 2) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return; // left button only
     // Leave the header (pills, Auto-switch toggle, buttons) and any interactive
     // tile to their own gestures — only the gauge grid area starts a swipe
@@ -4803,7 +5473,7 @@ const Gauges = () => {
   const addPage = () => {
     const name = (prompt('Page name (e.g. Driving, Debug)') || '').trim();
     if (!name) return;
-    const id = Math.max(0, ...pages.map(p => p.id)) + 1;
+    const id = Math.max(0, ...pages.map(p => (typeof p.id === 'number' ? p.id : 0))) + 1;
     setPages([...pages, { id, name, items: [] }]);
     setActivePage(id);
   };
@@ -4813,11 +5483,11 @@ const Gauges = () => {
     setPages(pages.map(p => p.id !== activePage ? p : { ...p, name }));
   };
   const deletePage = () => {
-    if (pages.length <= 1) { alert('At least one page is required.'); return; }
+    if (dash || shownPages.length <= 1) { alert('At least one page is required.'); return; }
     if (!confirm('Delete page "' + page.name + '" and its ' + items.length + ' gauge(s)?')) return;
     const next = pages.filter(p => p.id !== activePage);
     setPages(next);
-    setActivePage(next[0].id);
+    setActivePage(next.find(p => p.id !== dashId).id);
   };
   // Replace everything with the bundled example set (data/gauges-sample.json,
   // ships with the firmware image) — a quick tour of every gauge type, page
@@ -4828,9 +5498,11 @@ const Gauges = () => {
       const r = await fetch('/gauges-sample.json');
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
-      if (!confirm('Replace your current gauges (' + pages.length + ' page' + (pages.length === 1 ? '' : 's') + ') with the sample set?\n\n'
+      if (!confirm('Replace your current gauges (' + shownPages.length + ' page' + (shownPages.length === 1 ? '' : 's') + ') with the sample set?\n\n'
         + 'Your current layout will be overwritten — use Export settings (Settings → Web Interface) first if you want a backup.')) return;
-      const migrated = migrateGauges(data);
+      // The Dashboard's page is kept: the sample only replaces gauge pages
+      const keepDash = pages.find(p => p.id === dashId);
+      const migrated = [...(keepDash ? [keepDash] : []), ...migrateGauges(data).filter(p => p.id !== dashId)];
       let maxId = 0;
       migrated.forEach(p => p.items.forEach(g => { if (typeof g.id === 'number' && g.id > maxId) maxId = g.id; }));
       migrated.forEach(p => p.items.forEach(g => { if (!g.id) g.id = ++maxId; }));
@@ -4838,7 +5510,7 @@ const Gauges = () => {
       const auto = data.autoPage !== false;
       setAutoPage(auto);
       setPages(migrated);
-      setActivePage(migrated[0].id);
+      setActivePage((migrated.find(p => p.id !== dashId) || migrated[0]).id);
       setLayoutGen(g => g + 1); // remount the grid — same-id pages reuse stale DOM
       persist(migrated, auto);
     } catch (e) { alert('Could not load the sample layout: ' + e.message); }
@@ -4860,7 +5532,7 @@ const Gauges = () => {
     // (type a value, a stream tick lands, the field snaps back).
     // Page-condition values ride along in the same fetch (deduplicated) so
     // conditional page display sees them even from a page with no gauges.
-    const condNames = (autoPage && !configId)
+    const condNames = (autoPage && !configId && !dash)
       ? pages.map(p => p.cond && p.cond.name).filter(Boolean) : [];
     // Formula tiles stream every identifier in their expression; line tiles
     // with a second series stream that name too
@@ -4868,13 +5540,18 @@ const Gauges = () => {
       : [...new Set([
           ...items.flatMap(g => g.calc ? calcNames(g.calc) : [tileStreamName(g)]),
           ...items.map(g => (g.type === 'line' && g.name2) || ''),
+          ...items.flatMap(tileExtraNames),
           ...condNames,
         ].filter(Boolean))];
     if (names.length === 0) {
       dispatch({ type: 'SET_LOGGING', payload: false });
       return;
     }
-    dispatch({ type: 'SET_LOGGING', payload: true });
+    // Gauge pages pause the global json poll to give the stream the UART;
+    // the Dashboard keeps it (link state, messages, everything else it
+    // always showed) and streams its tiles alongside
+    if (!dash) dispatch({ type: 'SET_LOGGING', payload: true });
+    const wantNames = items.some(g => g.type === 'status');
     let active = true;
     let es = null; // EventSource when the firmware pushes values (SSE)
     const interval = 100; // ms between samples
@@ -4887,6 +5564,7 @@ const Gauges = () => {
       if (vals.length !== names.length) return;
       const byName = {};
       names.forEach((n, i) => { byName[n] = parseFloat(vals[i]); });
+      if (wantNames) setNameVals(prev => ({ ...prev, ...byName }));
       // Session recorder rides the stream, whatever the transport
       if (recRef.current) {
         const rec = recRef.current;
@@ -4915,7 +5593,7 @@ const Gauges = () => {
       // Conditional page display: when a page's condition STARTS matching,
       // switch to it. A persisting match doesn't re-trigger, so the user can
       // still browse away; when nothing matches the current page stays.
-      if (autoPage && !editingRef.current) {
+      if (autoPage && !editingRef.current && !dash) {
         const hit = pagesRef.current.find(p => p.cond && p.cond.name && condMatch(p.cond, byName[p.cond.name]));
         const hitId = hit ? hit.id : null;
         if (hitId !== lastHitRef.current) {
@@ -4943,13 +5621,21 @@ const Gauges = () => {
     // firmware, blocked port — falls back to the polling loop, which is
     // always available.
     if (state.ssePort && window.EventSource) {
-      const url = location.protocol + '//' + location.hostname + ':' + state.ssePort +
-        '/stream?names=' + names.join(',') + '&ms=' + interval;
-      es = new EventSource(url);
-      es.onmessage = (ev) => { if (active) applyText(ev.data); };
-      es.onerror = () => {
-        if (es) { es.close(); es = null; if (active) fetchRef.current = setTimeout(fetchLoop, 0); }
-      };
+      (async () => {
+        let ticket = '';
+        if (AUTH.enabled) {
+          try { ticket = (await (await fetch('/auth/stream-ticket')).json()).ticket || ''; } catch (e) {}
+          if (!active) return;
+          if (!ticket) { fetchRef.current = setTimeout(fetchLoop, 0); return; } // poll instead
+        }
+        const url = location.protocol + '//' + location.hostname + ':' + state.ssePort +
+          '/stream?names=' + names.join(',') + '&ms=' + interval + (ticket ? '&t=' + ticket : '');
+        es = new EventSource(url);
+        es.onmessage = (ev) => { if (active) applyText(ev.data); };
+        es.onerror = () => {
+          if (es) { es.close(); es = null; if (active) fetchRef.current = setTimeout(fetchLoop, 0); }
+        };
+      })();
     } else {
       fetchRef.current = setTimeout(fetchLoop, 0);
     }
@@ -4964,12 +5650,12 @@ const Gauges = () => {
   const spotNames = state.spotValues ? Object.keys(state.spotValues) : [];
 
   return html`
-    <div id="gauges" class="tabdiv main-content ${editing ? 'gauges-editing' : ''}" style="display:flex">
+    <div id=${dash ? 'dashboard' : 'gauges'} class="tabdiv main-content gauges-view ${editing ? 'gauges-editing' : ''}" style="display:flex">
       ${editing && html`
       <div class="main-right">
-        <h3 class="underline">Edit Gauges</h3>
+        <h3 class="underline">${dash ? 'Edit Dashboard' : 'Edit Gauges'}</h3>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">
-          <button onclick=${addGauge}><${Icon} n="plus" />Add Gauge</button>
+          <button onclick=${addGauge}><${Icon} n="plus" />${dash ? 'Add Tile' : 'Add Gauge'}</button>
           <button onclick=${() => { persist(pages); setEditing(false); }}><${Icon} n="check" />Save & Done</button>
           <button onclick=${cancelEditing} title="Discard changes made since you opened the editor"><${Icon} n="x" />Cancel & exit</button>
         </div>
@@ -4977,6 +5663,7 @@ const Gauges = () => {
         ${/* Page / condition / starter sections collapse behind a button on
             narrow screens so the editor doesn't fill the phone (same pattern
             as the Parameters actions) */ ''}
+        ${!dash && html`
         <button class="actions-expander" onclick=${() => setEditActionsOpen(!editActionsOpen)}>
           <span class="btn-ic" style=${'transition:transform .18s;transform:rotate(' + (editActionsOpen ? 180 : 0) + 'deg)'}><${Icon} n="chevron" /></span>
           Pages & options
@@ -5020,21 +5707,24 @@ const Gauges = () => {
         <button onclick=${loadSampleLayout} style="font-size:.75rem;padding:4px 10px"><${Icon} n="cloud" />Load sample layout</button>
         <p class="edit-help" style="font-size:.72rem;color:var(--text3);margin:.25rem 0 0">Six example pages (Driving, Battery, Temps, Charging, Debug, Controls) using standard value names — every gauge type included. Replaces your current gauges after confirmation.</p>
         </div>
+        `}
       </div>
       `}
-      <div class="main-left ${editing ? '' : 'gauge-swipe'}" onpointerdown=${onSwipeStart}
+      ${/* Swipe only where there's another page to swipe to; elsewhere (the
+          Dashboard, a single gauge page) touch behaves normally */ ''}
+      <div class="main-left ${editing || shownPages.length < 2 ? '' : 'gauge-swipe'}" onpointerdown=${onSwipeStart}
         onpointermove=${onSwipeMove} onpointerup=${onSwipeEnd}
         onpointercancel=${() => { swipeRef.current = null; clearSwipeHint(); }}>
         ${!editing && html`<div class="swipe-hint" ref=${swipeHintRef}></div>`}
         ${kiosk && html`<button class="kiosk-exit" title="Exit full screen" onclick=${() => setKiosk(false)}>✕</button>`}
         <div id="gauges-head" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem;gap:8px;flex-wrap:wrap">
-          <h2 style="margin:0">Gauges</h2>
+          <h2 style="margin:0">${dash ? 'Dashboard' : 'Gauges'}</h2>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            ${pages.some(p => p.cond && p.cond.name) && html`
+            ${!dash && pages.some(p => p.cond && p.cond.name) && html`
               <label class="toggle-row" id="auto-pages" style="width:auto;padding:4px 10px;font-size:.72rem" title="Conditional page display: switch pages automatically when a page condition matches">
-                <span class="toggle-label">Auto-switch</span>
+                <span class="toggle-label hd-label">Auto-switch</span>
                 <span class="switch sm">
-                  <input type="checkbox" checked=${autoPage} onchange=${e => {
+                  <input type="checkbox" aria-label="Auto-switch pages" checked=${autoPage} onchange=${e => {
                     const v = e.target.checked;
                     setAutoPage(v);
                     lastHitRef.current = null; // re-arm: a live match fires immediately
@@ -5045,14 +5735,15 @@ const Gauges = () => {
               </label>`}
             ${!editing && html`<button id="rec-btn" onclick=${() => (recording ? stopRec() : startRec())}
               title=${recording ? 'Stop and review the recording' : 'Record the streamed values for CSV export'}
+              aria-label=${recording ? 'Stop recording' : 'Record'}
               style=${'font-size:.75rem;padding:4px 12px' + (recording ? ';color:var(--red);border-color:var(--red)' : '')}>
-              ${recording ? '■ Stop' : '● Record'}</button>`}
-            ${!editing && html`<button id="fullscreen-btn" onclick=${() => setKiosk(true)} title="Full screen — gauges only, all chrome hidden" style="font-size:.75rem;padding:4px 12px">⛶ Full screen</button>`}
-            ${!editing && html`<button onclick=${startEditing} style="font-size:.75rem;padding:4px 12px"><${Icon} n="edit" />Edit Layout</button>`}
+              <span aria-hidden="true">${recording ? '■' : '●'}</span><span class="hd-label">${recording ? 'Stop' : 'Record'}</span></button>`}
+            ${!editing && html`<button id="fullscreen-btn" onclick=${() => setKiosk(true)} title="Full screen — gauges only, all chrome hidden" aria-label="Full screen" style="font-size:.75rem;padding:4px 12px"><span aria-hidden="true">⛶</span><span class="hd-label">Full screen</span></button>`}
+            ${!editing && can('operator') && html`<button onclick=${startEditing} title="Edit Layout" aria-label="Edit Layout" style="font-size:.75rem;padding:4px 12px"><${Icon} n="edit" /><span class="hd-label">Edit Layout</span></button>`}
           </div>
         </div>
-        <div id="gauge-pages" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:.6rem">
-          ${pages.map(p => html`
+        ${!dash && html`<div id="gauge-pages" class="seg" style="margin-bottom:.6rem">
+          ${shownPages.map(p => html`
             <button key=${p.id} class="page-pill ${p.id === activePage ? 'active' : ''} ${editing ? 'draggable' : ''}"
               draggable=${editing} onclick=${() => setActivePage(p.id)}
               ondragstart=${editing ? onPillDragStart(p.id) : undefined}
@@ -5061,9 +5752,9 @@ const Gauges = () => {
               title=${editing ? 'Drag to reorder' : ''}>${p.name}</button>
           `)}
           ${editing && html`<button class="page-pill" title="Add page" onclick=${addPage}>+</button>`}
-        </div>
+        </div>`}
         ${items.length === 0 && !editing && html`<p style="color:var(--text3);font-size:.85rem;text-align:center;padding:2rem 0">Click Edit Layout to add a gauge.</p>`}
-        <div class="grid-stack" ref=${gridRef} key=${'page-' + activePage + '-g' + layoutGen}>
+        <div class=${'grid-stack' + (stacked ? ' stacked' : '')} ref=${gridRef} key=${'page-' + activePage + '-g' + layoutGen}>
           ${items.map(g => {
             const sv = state.spotValues && state.spotValues[g.name];
             // Formula tiles carry their own unit text (there's no spot value
@@ -5073,18 +5764,19 @@ const Gauges = () => {
             const tv = lineVals[g.id];
             const alarming = !!(g.alarm && g.warn != null && tv != null && tv >= g.warn);
             return html`
-            <div class="grid-stack-item" key=${g.id} gs-id=${g.id} gs-x=${g.x} gs-y=${g.y} gs-w=${g.w} gs-h=${g.h}>
+            <div class="grid-stack-item" key=${g.id} gs-id=${g.id} gs-x=${g.x} gs-y=${g.y} gs-w=${g.w} gs-h=${g.h}
+              style=${stacked ? 'order:' + ((g.y || 0) * 20 + (g.x || 0)) + ';--h:' + (g.h || 2) + ';--span:' + ((g.w || 2) >= 4 ? 2 : 1) : undefined}>
               ${/* In edit mode a tap opens the tile's settings (no overlay
                   buttons — on a 1x1 mobile tile they'd all overlap the
                   resize handle); drags are filtered by dragBusyRef */ ''}
-              <div class="grid-stack-item-content gauge-tile ${alarming ? 'alarming' : ''} ${g.transparent ? 'tile-clear' : ''}" title=${g.label || g.name || ''}
+              <div class="grid-stack-item-content gauge-tile ${WIDGET_TYPES.has(g.type) ? 'widget-tile' : ''} ${g.type === 'status' ? 'hero-card' : ''} ${alarming ? 'alarming' : ''} ${g.transparent ? 'tile-clear' : ''}" title=${g.label || g.name || ''}
                 style=${alarming ? '--alarmc:' + ((g.warnColor && /^#[0-9a-fA-F]{6}$/.test(g.warnColor)) ? g.warnColor : '#ef4444') : ''}
                 onclick=${editing ? (() => { if (!dragBusyRef.current) setConfigId(g.id); }) : undefined}>
                 ${/* 'tap to set up' only for truly unconfigured tiles — a
                     static-text tile is fully configured without a value or
                     label (its body IS the text), and an action tile shows its
                     label on the button itself (no name row) */ ''}
-                ${(() => {
+                ${WIDGET_TYPES.has(g.type) ? html`<${WidgetTile} g=${g} value=${lineVals[g.id]} unit=${unit} enums=${enums} nameVals=${nameVals} editing=${editing} />` : (() => {
                   const configured = g.type === 'text' ? !!(g.name || g.label || g.calc || (g.text && String(g.text).trim()))
                     : g.type === 'action' ? !!(g.label || g.param || g.canId || g.presetId != null)
                     : g.type === 'toggle' ? !!(g.label || g.param || g.canId)
@@ -5145,6 +5837,14 @@ const Gauges = () => {
                   <option value="action">Action button</option>
                   <option value="toggle">Toggle switch</option>
                   <option value="slider">Slider</option>
+                  <optgroup label="Dashboard widgets">
+                    <option value="status">Status</option>
+                    <option value="metric">Metric + sparkline</option>
+                    <option value="messages">Inverter messages</option>
+                    <option value="terminal">Command terminal</option>
+                    <option value="actions">Action buttons</option>
+                    <option value="cansend">CAN frame sender</option>
+                  </optgroup>
                 </select>
                 <label style="margin-left:8px">Colour</label>
                 <input type="color" value=${cfg.color || '#4cc9f0'} oninput=${e => updateGaugeConfig(cfg.id, 'color', e.target.value)}
@@ -5303,7 +6003,7 @@ const Gauges = () => {
                   <span style="font-size:.72rem;color:var(--text3)">flip the drag direction (Min on the right, Max on the left)</span>
                 </label>
               `}
-              ${!isInteractive && html`
+              ${!isInteractive && !NO_VALUE_TYPES.includes(cfg.type) && html`
                 <p class="modal-sect">Value</p>
                 <div style="display:flex;gap:8px;align-items:center">
                   <label style="width:4.5em">Value</label>
@@ -5356,7 +6056,7 @@ const Gauges = () => {
                 ` : ''}
                 ${cfg.type !== 'indicator' ? decimalsRow : ''}
               `}
-              ${!['text', 'action', 'toggle'].includes(cfg.type) && html`
+              ${!['text', 'action', 'toggle', ...NO_VALUE_TYPES].includes(cfg.type) && html`
                 <p class="modal-sect">Scale</p>
                 <div style="display:flex;gap:8px;align-items:center">
                   ${/* value != null ? : '' + undefined-on-blank lets a leading
@@ -5473,6 +6173,40 @@ const Gauges = () => {
               `}
                 `;
               })()}
+              ${cfg.type === 'status' && html`
+                <p class="modal-sect">Status</p>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <label style="width:4.5em">Figures</label>
+                  <input id="status-figs" type="text" value=${(cfg.figs || []).join(', ')} placeholder=${getDashMetrics().join(', ')}
+                    onchange=${e => { const v = e.target.value.split(/[\s,]+/).filter(Boolean).slice(0, 6); updateGaugeConfig(cfg.id, 'figs', v.length ? v : undefined); }}
+                    style="flex:1;padding:5px 8px;font-family:var(--mono)" />
+                </div>
+                <p style="font-size:.72rem;color:var(--text3);margin:0">Spot values shown under the state, comma separated. Empty uses the Dashboard metrics from Settings.</p>`}
+              ${cfg.type === 'actions' && html`
+                <p class="modal-sect">Buttons</p>
+                ${DASH_ACTIONS.map(a => {
+                  const on = !Array.isArray(cfg.btns) || !cfg.btns.length || cfg.btns.includes(a.id);
+                  return html`<label key=${a.id} style="display:flex;gap:8px;align-items:center;cursor:pointer">
+                    <input type="checkbox" checked=${on} style="width:auto" onchange=${e => {
+                      const cur = Array.isArray(cfg.btns) && cfg.btns.length ? cfg.btns : DASH_ACTIONS.map(x => x.id);
+                      const next = e.target.checked ? [...new Set([...cur, a.id])] : cur.filter(x => x !== a.id);
+                      updateGaugeConfig(cfg.id, 'btns', next);
+                    }} />${a.label}</label>`;
+                })}`}
+              ${cfg.type === 'metric' && html`
+                <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
+                  <span style="width:4.5em">Spark</span>
+                  <input type="checkbox" checked=${cfg.spark !== false} onchange=${e => updateGaugeConfig(cfg.id, 'spark', e.target.checked ? undefined : false)} style="width:auto" />
+                  <span style="font-size:.72rem;color:var(--text3)">sparkline of recent values</span>
+                </label>`}
+              <p class="modal-sect">Page</p>
+              <div style="display:flex;gap:8px;align-items:center">
+                <label style="width:4.5em">Move to</label>
+                <select id="tile-move" value=${String(activePage)} onchange=${e => moveTileToPage(cfg.id, e.target.value)}
+                  style="width:auto;min-width:11em;padding:5px 30px 5px 8px">
+                  ${pages.map(p => html`<option value=${String(p.id)}>${p.id === dashId ? 'Dashboard' : p.name}</option>`)}
+                </select>
+              </div>
               <div style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap">
                 <button onclick=${() => setConfigId(null)} style="width:auto"><${Icon} n="check" />Done</button>
                 <button onclick=${() => { duplicateGauge(cfg.id); setConfigId(null); }} style="width:auto">⧉ Duplicate</button>
@@ -5510,6 +6244,17 @@ const App = () => {
   // the effect last ran
   const activeTabRef = useRef(state.activeTab);
   activeTabRef.current = state.activeTab;
+
+  // First load after a web-interface update: put back the layouts the
+  // update erased, then reload once so every tab reads them
+  useEffect(() => {
+    restoreFilesAfterUpdate().then(n => {
+      if (n > 0) {
+        showToast('Restored ' + n + ' layout file' + (n > 1 ? 's' : '') + ' after the update', 'ok');
+        setTimeout(() => location.reload(), 1200);
+      }
+    });
+  }, []);
 
   // URL breadcrumbs: reflect the active tab into the hash (so the current
   // view can be bookmarked) and follow hash changes (back/forward buttons,
@@ -5559,6 +6304,15 @@ const App = () => {
     uiPrefsReady.then(() => {
       if (getUpdateCheckAuto()) refreshUpdateTag(dispatch, false);
     });
+  }, []);
+
+  // Parameter sets that are live but not yet saved to flash
+  useEffect(() => {
+    const onSet = () => dispatch({ type: 'PARAMS_UNSAVED', payload: 1 });
+    const onSaved = () => dispatch({ type: 'PARAMS_UNSAVED', payload: 0 });
+    window.addEventListener('oi-param-set', onSet);
+    window.addEventListener('oi-params-saved', onSaved);
+    return () => { window.removeEventListener('oi-param-set', onSet); window.removeEventListener('oi-params-saved', onSaved); };
   }, []);
 
   // Unified data fetching — respects refreshRate setting
@@ -5645,17 +6399,23 @@ const App = () => {
     <${Store.Provider} value=${store}>
       <div id="content">
         <${Navbar} />
+        <${BottomBar} />
         <div id="content-wrapper">
           <div id="content-wrapper-inner" data-panel="open">
+            <${TopBar} />
+            ${AUTH.enabled && AUTH.role === 'viewer' && html`
+              <div id="readonly-bar" class="readonly-bar" role="note">
+                <b>Read-only account</b><span class="ro-long">— you can view everything; changes need an operator or admin.</span>
+              </div>`}
             <div id="communication-error-bar" class="communication-error-bar" style=${{ display: state.commError ? 'block' : 'none' }}>
               <p>Communication problem between ESP and STM</p>
             </div>
-            ${tab === 'dashboard' && html`<${Dashboard} />`}
+            ${tab === 'dashboard' && html`<${Gauges} key="dashboard" dash=${true} />`}
             ${tab === 'update' && html`<${Update} />`}
             ${tab === 'parameters' && html`<${Parameters} />`}
             ${tab === 'spotvalues' && html`<${SpotValues} />`}
             ${tab === 'plot' && html`<${Plot} />`}
-            ${tab === 'gauges' && html`<${Gauges} />`}
+            ${tab === 'gauges' && html`<${Gauges} key="gauges" />`}
             ${tab === 'logger' && html`<${Logger} />`}
             ${tab === 'canmapping' && html`<${CanMapping} />`}
             ${tab === 'files' && html`<${Files} />`}
@@ -5668,5 +6428,82 @@ const App = () => {
   `;
 };
 
+// ==================== Sign-in screen ====================
+// Phone-first: one column, big touch targets, 16px inputs (no iOS zoom),
+// the right autocomplete hints so password managers fill it.
+const LoginScreen = ({ note }) => {
+  const [name, setName] = useState(() => { try { return localStorage.getItem('lastUser') || ''; } catch (e) { return ''; } });
+  const [pw, setPw] = useState('');
+  const [remember, setRemember] = useState(() => { try { return localStorage.getItem('rememberMe') === '1'; } catch (e) { return false; } });
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const pwRef = useRef(null);
+  const userRef = useRef(null);
+  useEffect(() => { (name ? pwRef : userRef).current?.focus(); }, []);
+  const submit = async (e) => {
+    if (e) e.preventDefault();
+    if (!name.trim() || !pw) { setErr('Enter your user name and password.'); return; }
+    setBusy(true); setErr('');
+    try {
+      await authPost('/auth/login', { user: name.trim().toLowerCase(), password: pw, remember: remember ? '1' : '0' });
+      try { localStorage.setItem('lastUser', name.trim().toLowerCase()); localStorage.setItem('rememberMe', remember ? '1' : '0'); } catch (e2) {}
+      location.reload(); // a fresh page for the signed-in user
+    } catch (ex) {
+      setBusy(false);
+      setPw('');
+      if (ex.status === 429) setErr('Too many attempts. Try again in ' + Math.max(1, Math.ceil((ex.retryAfter || 60) / 60)) + ' min.');
+      else if (ex.status === 401) setErr('Incorrect user name or password.');
+      else setErr(ex.message || 'Sign-in failed');
+      pwRef.current?.focus();
+    }
+  };
+  return html`
+    <main id="login" class="login-wrap">
+      <form class="login-card" onsubmit=${submit} autocomplete="on">
+        <svg class="login-logo" viewBox="0 0 48 48" aria-hidden="true">
+          <circle cx="24" cy="24" r="21.4" fill="none" stroke="currentColor" stroke-width="2.4" opacity=".5" />
+          <path fill="none" stroke="#5b9dff" stroke-width="2.4" stroke-linecap="round" d="M6 24 C 12 11, 18 11, 24 24 C 30 37, 36 37, 42 24" />
+        </svg>
+        <h1>Sign in</h1>
+        <p class="login-sub">OpenInverter web interface</p>
+        ${note && html`<p class="login-note" role="status">${note}</p>`}
+        <label class="auth-field">User name
+          <input id="login-user" ref=${userRef} type="text" name="username" autocomplete="username" autocapitalize="none"
+            autocorrect="off" spellcheck="false" maxlength="32" value=${name} oninput=${e => setName(e.target.value)} />
+        </label>
+        <label class="auth-field">Password
+          <input id="login-password" ref=${pwRef} type="password" name="password" autocomplete="current-password"
+            value=${pw} oninput=${e => setPw(e.target.value)} />
+        </label>
+        <label class="login-remember">
+          <input id="login-remember" type="checkbox" checked=${remember} onchange=${e => setRemember(e.target.checked)} />
+          Keep me signed in on this device
+        </label>
+        ${err && html`<p class="auth-err" id="login-error" role="alert">${err}</p>`}
+        <button id="login-submit" class="primary login-btn" type="submit" disabled=${busy}>${busy ? 'Signing in…' : 'Sign in'}</button>
+        <p class="auth-hint">Leave “keep me signed in” off on a shared phone or computer. Locked out? An admin can reset
+          your password; if no admin can sign in, hold the module's BOOT button for 10 seconds to remove all users.</p>
+      </form>
+    </main>`;
+};
+
+// Decides between the sign-in screen and the app, once /auth/state answers.
+// Asked at load (not from an effect, which Preact defers to the next frame)
+// so the app appears as soon as the reply lands.
+const viewFor = (st) => ({ view: st.enabled && !st.user ? 'login' : 'app' });
+let authBooted = null;
+authLoadState().then(st => {
+  authApply(st);
+  authBooted = st;
+  if (setRootView) setRootView(viewFor(st));
+});
+const Root = () => {
+  const [view, setView] = useState(() => authBooted ? viewFor(authBooted) : { view: 'loading' });
+  setRootView = setView;
+  if (view.view === 'login') return html`<${LoginScreen} note=${view.note} />`;
+  if (view.view === 'app') return html`<${App} />`;
+  return html`<div class="auth-loading"><div class="css-spinner css-spinner-lg"></div></div>`;
+};
+
 // ==================== Mount ====================
-render(html`<${App} />`, document.body);
+render(html`<${Root} />`, document.body);

@@ -17,10 +17,11 @@ test.describe('Gauge value transport', () => {
     await openApp(page, mock);
     await gotoTab(page, 'Gauges');
     await expect(gaugeVal(page)).toContainText('398.5');
-    await expect.poll(() => streamUrls.length).toBeGreaterThan(0);
-    expect(Number(streamUrls[0].port)).toBe(mock.ssePort);
-    expect(streamUrls[0].searchParams.get('names')).toBe('udc');
-    expect(streamUrls[0].searchParams.get('ms')).toBe('100');
+    // The Dashboard streams its own status values first; pick the page's stream
+    const pageStream = () => streamUrls.find(u => u.searchParams.get('names') === 'udc');
+    await expect.poll(() => !!pageStream()).toBe(true);
+    expect(Number(pageStream().port)).toBe(mock.ssePort);
+    expect(pageStream().searchParams.get('ms')).toBe('100');
   });
 
   for (const mode of ['off', '404']) {
@@ -69,7 +70,7 @@ test.describe('Gauge value transport', () => {
     await openApp(page, mock);
     await gotoTab(page, 'Gauges');
     await expect.poll(async () => await mock.commands()).toContain('stream udc');
-    await gotoTab(page, 'Dashboard');
+    await gotoTab(page, 'Settings'); // not the Dashboard: its status tile streams too
     // The listener holds one client; once the browser closes the
     // EventSource the mock drops its handle
     await expect.poll(async () => (await fetch(mock.url + '/__test/state').then(r => r.json())).sseOpen).toBe(false);

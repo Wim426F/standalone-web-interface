@@ -31,16 +31,28 @@
 //   GET  /__test/add-value?name=&value=&unit= -> add a spot value
 //   GET  /__test/can-cache?loaded=0|1 -> CAN param cache state (0 = device offline)
 //   GET  /__test/sse?mode=on|off|404  -> SSE listener: normal / port closed / refuse
+//   GET  /__test/add-user?name=&password=&role= -> create an account directly
+//   GET  /__test/clock?advance=ms    -> move the mock's clock (session expiry)
+//   GET  /__test/auth-reset          -> the BOOT-button / serial lockout recovery
+//
+// Users & sign-in (auth.mjs) follow the firmware: off with no users; with
+// users every request passes the same permission table, sessions are
+// HttpOnly SameSite=Strict cookies (or Bearer), state changes need the
+// X-OI-Auth header or a same-host Origin, and /cmd answers without CORS.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, URLSearchParams } from 'node:url';
+import {
+  createAuth, PERM, methodBit, findRoute, staticPerm, filePerm, cmdPerm, csrfOk, originHostMatches,
+  cookieValue, bearerToken, PASSWORD_MIN, PASSWORD_MAX, USER_MAX, SESSION_REMEMBER_IDLE_MS,
+} from './auth.mjs';
 
 const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'data');
 
 const MIME = {
   '.html': 'text/html', '.htm': 'text/html', '.js': 'application/javascript', '.css': 'text/css',
-  '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png',
+  '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2',
 };
 
 // Firmware limits (esp32-web-interface.ino)
@@ -108,9 +120,13 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
   let otainfo = { version: 'v0.1-mock', repo: 'https://github.com/wjcloudy/esp32-web-interface', target: 'esp32' };
   let uartPages = 4; // pages reported for the UART-mode fwupdate flow
   let fwSteps = []; // every step passed to /fwupdate, in order
+  let otaFlashes = 0; // web-interface OTA images accepted by /espupdate
   let wifi = { apSSID: 'inverter', staSSID: 'mocknet' }; // what WiFi.softAPSSID()/SSID() report
   let sseMode = 'on';
   let sseRes = null; // the one live stream (firmware: newest stream wins)
+  let clockOffset = 0;
+  const now = () => Date.now() + clockOffset;
+  const auth = createAuth(now);
 
   const allValues = () => ({ ...inverter.params, ...inverter.spot });
   const findParamByName = (name) => allValues()[name];
@@ -340,8 +356,14 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
     req.on('data', c => chunks.push(c));
     req.on('end', () => {
       const body = Buffer.concat(chunks);
+      // WebServer: a urlencoded body's fields join the query arguments
+      if ((req.headers['content-type'] || '').startsWith('application/x-www-form-urlencoded')) {
+        for (const [k, v] of new URLSearchParams(body.toString())) q.append(k, v);
+      }
+      // Firmware sends CORS only on /cmd and only with sign-in off; the mock
+      // has always sent it everywhere with sign-in off (harmless for tests)
       const send = (code, s, type = 'text/plain', extra = {}) => {
-        res.writeHead(code, { 'Content-Type': type, 'Access-Control-Allow-Origin': '*', ...extra });
+        res.writeHead(code, { 'Content-Type': type, ...(auth.enabled() ? {} : { 'Access-Control-Allow-Origin': '*' }), ...extra });
         res.end(s);
       };
       const text = (s, type = 'text/plain') => send(200, s, type);
@@ -353,9 +375,17 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
 
       // --- test introspection ---
       if (p === '/__test/commands') return json(commandLog);
-      if (p === '/__test/state') return json({ inverter, files: [...files.keys()], settings, canNodes, canMap, commandLog, fwSteps, wifi, sseOpen: sseRes !== null });
+      if (p === '/__test/state') return json({ inverter, files: [...files.keys()], settings, canNodes, canMap, commandLog, fwSteps, otaFlashes, wifi, sseOpen: sseRes !== null,
+        users: auth.users().map(u => ({ name: u.name, role: u.role })), sessions: auth.sessionCount(), otaRunning: !auth.enabled() });
+      if (p === '/__test/add-user') {
+        const err = auth.add(q.get('name'), q.get('password'), q.get('role') || 'viewer');
+        return err ? send(400, err) : text('ok');
+      }
+      if (p === '/__test/clock') { clockOffset += toInt(q.get('advance')); return text(String(clockOffset)); }
+      if (p === '/__test/auth-reset') { auth.clear(); return text('ok'); }
       if (p === '/__test/reset') {
-        inverter = freshInverterState(); files = new Map(); commandLog = []; fwSteps = [];
+        auth.clear(); clockOffset = 0;
+        inverter = freshInverterState(); files = new Map(); commandLog = []; fwSteps = []; otaFlashes = 0;
         settings = freshSettings(); canNodes = null; wifi = { apSSID: 'inverter', staSSID: 'mocknet' }; canMap = []; canCacheLoaded = true; sseMode = 'on';
         fwStatus = { state: 0 };
         return text('reset');
@@ -395,6 +425,156 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
         return text('ok');
       }
 
+      // --- the firmware's router: every request passes the permission check ---
+      const mb = methodBit(req.method);
+      let slot = -1, bearer = false, me = null;
+      if (auth.enabled()) {
+        let tok = bearerToken(req.headers.authorization);
+        bearer = !!tok;
+        if (!tok) tok = cookieValue(req.headers.cookie, 'oisess');
+        const sl = tok ? auth.findSession(tok) : -1;
+        if (sl >= 0) {
+          const ss = auth.session(sl);
+          const ui = auth.find(ss.user);
+          if (ui < 0 || auth.users()[ui].gen !== ss.userGen) auth.revoke(sl);
+          else { slot = sl; me = auth.users()[ui]; }
+        }
+      }
+      const role = !auth.enabled() ? 'admin' : (me ? me.role : 'none');
+      const csrf = () => !auth.enabled() || csrfOk(bearer, req.headers.origin, req.headers.referer, req.headers['x-oi-auth'], req.headers.host);
+      const refuse = (code, error, need) => {
+        res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(need ? { error, need } : { error }));
+      };
+      // 0 = allowed, else the refusal was sent (authCheck)
+      const check = (need) => {
+        if (need === PERM.DENY) { send(404, 'FileNotFound'); return 404; }
+        if (!auth.enabled() || need === PERM.PUBLIC) return 0;
+        if (slot < 0) { refuse(401, 'sign-in required'); return 401; }
+        if ((({ viewer: 1, operator: 2, admin: 3 })[role] || 0) < need) { refuse(403, 'your account cannot do this', auth.permRoleName(need)); return 403; }
+        if (need >= PERM.WRITE && !csrf()) { refuse(403, 'cross-site request refused'); return 403; }
+        return 0;
+      };
+      const rule = findRoute(mb, p);
+      let need = rule ? rule[2] : staticPerm(p);
+      if (need === PERM.CMD) need = cmdPerm((q.get('cmd') || '').slice(0, settings.can_mode ? CAN_CMD_MAX : UART_CMD_MAX));
+      let uploads = null;
+      if (need === PERM.FILE) {
+        need = PERM.WRITE;
+        if (mb === 2) {
+          // Uploads are checked per file, at UPLOAD_FILE_START: allowed files
+          // are written, the reply is the first refusal
+          uploads = parseMultipart(body, req.headers['content-type']).filter(pt => pt.filename);
+        } else {
+          const fa = firstArg();
+          if (fa !== null) need = Math.max(need, filePerm(fa));
+        }
+      }
+      if (uploads) {
+        let refusedNeed = null;
+        for (const part of uploads) {
+          const pn = Math.max(PERM.WRITE, filePerm(part.filename));
+          if (!auth.enabled() || (slot >= 0 && (({ viewer: 1, operator: 2, admin: 3 })[role] || 0) >= pn && pn !== PERM.DENY && (pn < PERM.WRITE || csrf()))) part.allowed = true;
+          else if (refusedNeed === null) refusedNeed = pn;
+        }
+        if (refusedNeed !== null) {
+          for (const part of uploads) if (part.allowed) files.set(fileKey(part.filename), part.data);
+          return check(refusedNeed);
+        }
+      }
+      if (check(need)) return;
+      // No route serves this method+path: the static file handler
+      if (!rule) {
+        if (fileRead(res, p)) return;
+        return send(404, 'FileNotFound', 'text/plain', { Refresh: '6; url=/update' });
+      }
+
+      // --- sign-in endpoints ---
+      const setCookie = (token, remember) => 'oisess=' + token + '; Path=/; HttpOnly; SameSite=Strict' + (remember ? '; Max-Age=' + SESSION_REMEMBER_IDLE_MS / 1000 : '');
+      const startSession = (u, remember, extra) => {
+        const { slot: s2, token } = auth.createSession(u.name, u.gen, remember);
+        slot = s2; me = u;
+        extra['Set-Cookie'] = setCookie(token, remember);
+        if (q.get('token') === '1') extra['X-OI-Token'] = token;
+      };
+      const ok = (o, extra = {}) => { res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...extra }); res.end(JSON.stringify(o)); };
+      const ipOf = req.socket.remoteAddress || '';
+      if (p === '/auth/state') {
+        const o = { enabled: auth.enabled() };
+        if (auth.enabled() && slot >= 0) Object.assign(o, { user: me.name, role: me.role, remember: auth.session(slot).remember });
+        else if (!auth.enabled()) Object.assign(o, { user: null, role: 'admin' });
+        else Object.assign(o, { user: null, role: null });
+        o.password_min = PASSWORD_MIN;
+        return ok(o);
+      }
+      if (p === '/auth/login') {
+        if (!auth.enabled()) return refuse(400, 'sign-in is off: no users are set up');
+        if (!csrf()) return refuse(403, 'cross-site request refused');
+        const name = (q.get('user') || '').slice(0, 40).trim().toLowerCase();
+        const pw = (q.get('password') || '').slice(0, PASSWORD_MAX + 1);
+        const wait = auth.allowed(ipOf, name);
+        if (wait) { res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(wait) }); return res.end('{"error":"too many attempts, wait a few minutes"}'); }
+        const i = auth.verify(name, pw);
+        if (i < 0) { auth.failure(ipOf, name); return refuse(401, 'incorrect user name or password'); }
+        auth.success(ipOf);
+        const extra = {};
+        const u = auth.users()[i];
+        startSession(u, q.get('remember') === '1', extra);
+        return ok({ ok: true, user: { name: u.name, role: u.role } }, extra);
+      }
+      if (p === '/auth/logout') {
+        if (!csrf()) return refuse(403, 'cross-site request refused');
+        if (slot >= 0) auth.revoke(slot);
+        return ok({ ok: true }, { 'Set-Cookie': 'oisess=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0' });
+      }
+      if (p === '/auth/password') {
+        if (!auth.enabled() || slot < 0) return refuse(400, 'sign-in is off');
+        if (!csrf()) return refuse(403, 'cross-site request refused');
+        const wait = auth.allowed(ipOf, me.name);
+        if (wait) { res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(wait) }); return res.end('{"error":"too many attempts, wait a few minutes"}'); }
+        if (auth.verify(me.name, (q.get('old') || '').slice(0, PASSWORD_MAX + 1)) < 0) { auth.failure(ipOf, me.name); return refuse(403, 'current password is incorrect'); }
+        const remember = auth.session(slot).remember;
+        const err = auth.setPassword(me.name, q.get('new') || '');
+        if (err) return refuse(400, err);
+        auth.revokeUser(me.name);
+        const extra = {};
+        startSession(auth.users()[auth.find(me.name)], remember, extra);
+        return ok({ ok: true }, extra);
+      }
+      if (p === '/auth/users') {
+        if (req.method !== 'POST') return ok({ enabled: auth.enabled(), me: me ? me.name : null, max: USER_MAX, users: auth.users().map(u => ({ name: u.name, role: u.role })) });
+        if (!csrf()) return refuse(403, 'cross-site request refused');
+        const op = q.get('op'), name = (q.get('user') || '').slice(0, 40).trim().toLowerCase(), r = q.get('role') || '';
+        const actor = me ? me.name : null;
+        const wasEnabled = auth.enabled();
+        let err;
+        if (op === 'add') err = !wasEnabled && r !== 'admin' ? 'the first user must be an admin' : auth.add(name, q.get('password') || '', r);
+        else if (op === 'remove') { err = auth.remove(name, actor); if (!err) auth.revokeUser(name); }
+        else if (op === 'role') { err = auth.setRole(name, r, actor); if (!err) auth.revokeUser(name); }
+        else if (op === 'password') { err = auth.setPassword(name, q.get('password') || ''); if (!err) auth.revokeUser(name); }
+        else return refuse(400, 'op must be add, remove, role or password');
+        if (err) return refuse(auth.resultStatus(err), err);
+        const extra = {};
+        if (!wasEnabled && auth.enabled()) {
+          auth.revokeAll();
+          if (sseRes) { sseRes.destroy(); sseRes = null; }
+          startSession(auth.users()[auth.find(name)], false, extra);
+        } else if (actor && (op === 'password' || op === 'role') && name === actor) {
+          const mi = auth.find(actor);
+          if (mi >= 0) startSession(auth.users()[mi], false, extra);
+        }
+        return ok({ ok: true }, extra);
+      }
+      if (p === '/auth/stream-ticket') {
+        if (!auth.enabled()) return ok({ ticket: '' });
+        const t = auth.issueTicket(slot);
+        return t ? ok({ ticket: t }) : refuse(401, 'sign-in required');
+      }
+      if (p === '/update') {
+        if (req.method === 'GET') return text('<form method="POST" enctype="multipart/form-data"><input type="file" name="firmware"></form>', 'text/html');
+        return text('Update error: mock flashes nothing', 'text/html');
+      }
+
       // --- firmware API ---
       if (p === '/cmd') {
         if (!q.has('cmd')) return send(500, 'BAD ARGS');
@@ -420,9 +600,7 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
           return;
         }
         if (req.method === 'POST') { // multipart upload, stored under the part's filename
-          for (const part of parseMultipart(body, req.headers['content-type'])) {
-            if (part.filename) files.set(fileKey(part.filename), part.data);
-          }
+          for (const part of uploads || []) files.set(fileKey(part.filename), part.data);
           return text('');
         }
         if (req.method === 'PUT' || req.method === 'DELETE') { // handleFileCreate / handleFileDelete
@@ -459,15 +637,23 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
       if (p === '/settings') {
         // handleSettings: ONE setting group per request, first match wins
         const ok = () => text('{"result":"ok"}', 'text/json');
-        if (q.has('txrx_swap')) {
+        const mayWrite = req.method === 'POST' || !auth.enabled();
+        if (mayWrite && q.has('txrx_swap')) {
           settings.txrx_swapped = q.get('txrx_swap') === '1';
           settings.uart_tx_pin = settings.txrx_swapped ? 3 : 1;
           settings.uart_rx_pin = settings.txrx_swapped ? 1 : 3;
           return ok();
         }
-        if (q.has('dev_name')) { settings.dev_name = q.get('dev_name').slice(0, 32); return ok(); }
-        if (q.has('ap_fallback')) { settings.ap_fallback = q.get('ap_fallback') === '1'; return ok(); }
-        if (q.has('can_mode')) {
+        if (mayWrite && q.has('reset_settings')) {
+          // cfgResetAll(): device config back to defaults (file + NVS copy),
+          // users/Wi-Fi/layouts untouched; the device then reboots
+          settings = freshSettings(); canNodes = null;
+          files.delete('settings.json'); files.delete('uiprefs.json');
+          return text('{"result":"ok","rebooting":true}', 'text/json');
+        }
+        if (mayWrite && q.has('dev_name')) { settings.dev_name = q.get('dev_name').slice(0, 32); return ok(); }
+        if (mayWrite && q.has('ap_fallback')) { settings.ap_fallback = q.get('ap_fallback') === '1'; return ok(); }
+        if (mayWrite && q.has('can_mode')) {
           const s = settings;
           s.can_mode = q.get('can_mode') === '1';
           for (const k of ['can_node_id', 'can_speed', 'can_rx_pin', 'can_tx_pin', 'uart_rx_pin', 'uart_tx_pin'])
@@ -544,13 +730,24 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
         if (!settings.can_mode) return send(400, '{"error":"CAN mode not enabled"}', 'text/json');
         return text('[{"nodeId":1,"serial":3405691582}]', 'text/json');
       }
+      if (p === '/espupdate' && req.method === 'POST') {
+        // A combined OTA image rewrites the whole SPIFFS partition. The
+        // firmware keeps settings.json/uiprefs.json in NVS and writes them
+        // back at boot (cfgBootSync), so those survive; everything else the
+        // user saved is gone. (This mock's settings live in memory, so they
+        // survive too, matching the device.)
+        const kept = new Map();
+        for (const name of ['settings.json', 'uiprefs.json']) if (files.has(name)) kept.set(name, files.get(name));
+        files = kept;
+        otaFlashes++;
+        return json({ ok: true });
+      }
       if (p === '/reboot') return text('Rebooting...');
       if (p === '/reset-inverter') return text('Inverter reset sent');
       if (p === '/virtual-reload') return json({ count: virtualItems().length });
       if (p === '/baud') return text('921600');
 
-      // onNotFound: any SPIFFS file (uploaded, or the data/ image), else 404
-      if (req.method === 'GET' && fileRead(res, p)) return;
+      // A table route the mock doesn't implement (rtc, sdcard, can-debug ...)
       send(404, 'FileNotFound', 'text/plain', { Refresh: '6; url=/update' });
     });
   });
@@ -565,18 +762,29 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
       res.writeHead(404, { Connection: 'close' });
       return res.end();
     }
+    let streamAuth = null;
+    if (auth.enabled()) {
+      streamAuth = auth.redeemTicket(url.searchParams.get('t') || '');
+      if (!streamAuth) { res.writeHead(401, { Connection: 'close' }); return res.end(); }
+    }
     let ms = toInt(url.searchParams.get('ms'));
     if (ms < 50) ms = 100;
     if (ms > 5000) ms = 5000;
     if (sseRes) { sseRes.destroy(); sseRes = null; } // newest stream wins
     commandLog.push('stream ' + names);
+    const origin = req.headers.origin || '';
+    const cors = !auth.enabled() ? { 'Access-Control-Allow-Origin': '*' }
+      : (origin && /^[\x21-\x7e]+$/.test(origin) && originHostMatches(origin, req.headers.host) ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' } : {});
     res.writeHead(200, {
       'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*',
+      'Connection': 'keep-alive', ...cors,
     });
+
     res.write('retry: 1000\n\n');
     sseRes = res;
     const tick = () => {
+      // Sign-in on: the stream ends with its session (sseTick's alive check)
+      if (auth.enabled() && (!streamAuth || !auth.alive(streamAuth.slot, streamAuth.serial))) { res.destroy(); return; }
       // Same reply the firmware forwards: CAN = tab-separated, UART = the
       // inverter's per-line 'get' output; CR/LF flattened to spaces
       const out = settings.can_mode ? canCommand('get ' + names) : uartCommand('get ' + names);

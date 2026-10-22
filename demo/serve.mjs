@@ -10,7 +10,7 @@ import { buildDemoSite } from './build.mjs';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.css': 'text/css',
-  '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png',
+  '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2',
 };
 
 export function serveStatic(dir, { port = 0, base = '/' } = {}) {
@@ -18,7 +18,9 @@ export function serveStatic(dir, { port = 0, base = '/' } = {}) {
   const server = http.createServer((req, res) => {
     const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
     if (!p.startsWith(base)) { res.writeHead(404); res.end('not found'); return; }
-    const rel = p.slice(base.length) || 'index.html';
+    // A folder URL serves its index.html, as GitHub Pages does (flash/)
+    let rel = p.slice(base.length) || 'index.html';
+    if (rel.endsWith('/')) rel += 'index.html';
     const abs = path.resolve(root, rel);
     if (!abs.startsWith(root + path.sep)) { res.writeHead(404); res.end('not found'); return; }
     // Open once and check/read through the same descriptor, so the file

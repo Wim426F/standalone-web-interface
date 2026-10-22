@@ -48,7 +48,14 @@ export function buildDemoSite(out = path.join(ROOT, '_site')) {
     }
     fs.copyFileSync(src, path.join(out, name));
   }
+  // Bundled web fonts live in a sub-folder
+  fs.cpSync(path.join(DATA, 'fonts'), path.join(out, 'fonts'), { recursive: true });
   for (const name of ['demo-data.js', 'demo-esp.js']) fs.copyFileSync(path.join(DEMO, name), path.join(out, name));
+  // Browser installer (flash/): the page plus a self-hosted copy of ESP Web
+  // Tools (npm, pinned); the release images and manifests are added at deploy
+  // time by demo/flash-firmware.mjs
+  fs.cpSync(path.join(DEMO, 'flash'), path.join(out, 'flash'), { recursive: true });
+  fs.cpSync(path.join(ROOT, 'node_modules', 'esp-web-tools', 'dist', 'web'), path.join(out, 'flash', 'ewt'), { recursive: true });
 
   let page = fs.readFileSync(path.join(out, 'index.html'), 'utf8');
   page = page.replace(/<link rel="manifest"[^>]*>\s*/, '');

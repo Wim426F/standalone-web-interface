@@ -96,7 +96,12 @@ phone it installs to the home screen like an app.
    `esp32` is the classic ESP32 (e.g. Wemos D1 Mini ESP32), `esp32s3` the ESP32-S3 (LilyGO T-2CAN). Every
    push to `dev` also builds images as [workflow artifacts](https://github.com/wjcloudy/esp32-web-interface/actions/workflows/build.yml).
 
-2. **Flash it** at offset `0x0` with [ESP Web Tools / esptool-js](https://espressif.github.io/esptool-js/) in the browser, or `esptool.py`:
+2. **Flash it from your browser** with the **[installer](https://wjcloudy.github.io/esp32-web-interface/flash/)**:
+   plug the board in by USB, pick Stable or Dev and press Install (Chrome or Edge on a computer). It picks the right
+   image for your chip and needs no download. It's built on [ESP Web Tools](https://github.com/esphome/esp-web-tools)
+   and hosted with the [live demo](https://wjcloudy.github.io/esp32-web-interface/).
+
+   Or flash the image yourself at offset `0x0` with `esptool.py`:
 
    ```sh
    esptool.py --chip esp32   write_flash 0x0 esp32_vX.Y-0x000.bin     # classic ESP32
@@ -154,6 +159,9 @@ new-release check.
 access point, device name (also the hostname), dark/light/system theme and accent
 colour, keep-screen-awake, and export/import of every layout and preference as
 one JSON file.
+
+**Users & access** - optional sign-in with viewer (read-only), operator and admin
+accounts, enforced by the module itself ([details](#users-and-access)).
 
 </td>
 </tr>
@@ -226,6 +234,50 @@ Both transports feed the same pages. Gauges stream their values over a
 server-sent-events channel from the board on either transport, falling back to
 polling ([protocol](PROTOCOL.md)).
 
+## Users and access
+
+Out of the box there are no accounts and no sign-in: anyone who can reach the module can see and
+change everything, exactly as before. To share a car or a test bench safely, open
+**Settings → Users & Access** and create an admin account. From then on every page and every
+request needs a signed-in user, and you can add up to eight accounts with one of three roles:
+
+| Role | Can |
+|---|---|
+| **Viewer** | Read only: dashboard, spot values, parameters, plots, gauges, logger, file list. |
+| **Operator** | Viewer + change and save parameters, start/stop, reset the inverter, presets, CAN mapping and CAN messages, layout and data files. |
+| **Admin** | Operator + user management, Wi-Fi and device settings, firmware updates (inverter and this module), ESP32 reboot, replacing the web interface's own files. |
+
+The module enforces this itself; the interface only greys out what your role can't use. A viewer
+can still type read-only terminal commands (`get`, `json`, `errors`, `stream`, `can list`), but every
+other command is refused. Scripts sign in with
+`curl -H 'X-OI-Auth: 1' -d user=NAME -d password=PASS -d token=1 -D - http://inverter.local/auth/login`
+and send the `X-OI-Token` reply header back as `Authorization: Bearer <token>`. (Requests that use
+the session cookie instead must carry `X-OI-Auth: 1` when they change something - the browser
+interface does, a page on another site can't.)
+
+- **Sessions** last 12 hours of inactivity ("keep me signed in": 30 days), never more than 30
+  days, and end on sign-out, on a reboot, and when an admin changes that user's role or password
+  or removes them. Sign-in attempts are rate-limited.
+- **Passwords** are stored only as PBKDF2-SHA256 hashes with a per-user salt, in the module's NVS
+  flash - not in the filesystem, so they are never served, listed, exported or erased by an OTA update.
+- **While sign-in is on**, the network-flashing port (ArduinoOTA, `espota`) is switched off; update
+  through the **Update** page as an admin instead.
+- **Plain HTTP**: the module has no TLS, so passwords and session cookies cross the network
+  unencrypted. Use sign-in on a network you trust (the module's own access point with a strong
+  passphrase, or your own Wi-Fi), not on a public one.
+
+### Locked out?
+
+Recovery needs the hardware in your hands - it is deliberately not possible over the network:
+
+1. **BOOT button**: hold the board's BOOT button for 10 seconds while it is running. All users
+   are deleted, sign-in turns off and the module restarts; settings, layouts and Wi-Fi are kept.
+   (Skipped if that pin is wired to the UART/CAN link; builds can move or disable it with
+   `-D AUTH_RESET_PIN=<gpio>` / `-1`.)
+2. **Serial**: on the debug serial port (115200 baud; USB on the T-2Can), type `auth reset` and Enter.
+3. **USB reflash**: erasing the flash and flashing the `*-0x000.bin` image as in
+   [Over USB](#over-usb) also removes every account.
+
 ## Flashing and updating
 
 ### Over Wi-Fi (OTA)
@@ -238,15 +290,20 @@ Once a board is running, update it from the **Update** page - no cables or toolc
 - **Install OTA image from file** flashes an `*-ota.bin` you already have.
 - **Upload single file** replaces one file of the web interface.
 
-> **Export your settings first.** An OTA update replaces the whole filesystem, which erases saved
-> favourites, gauge and plot layouts, presets and preferences. **Update → Export settings (backup)**
-> saves them as one file; import it again from **Settings → Configuration**.
+> **Your settings survive updates.** An OTA update replaces the whole filesystem, but the device
+> keeps its settings (UART/CAN pins, CAN node and speed, device name, UI preferences), user
+> accounts and Wi-Fi outside it, and puts them back after the reboot. Your layouts (gauges, plots,
+> presets, favourites, virtual values) are backed up in the browser you update from and restored
+> automatically. Flashing over USB, or updating from a different browser, doesn't do that: use
+> **Update → Export settings (backup)** first and import it again from **Settings → Configuration**.
+> To go back to default settings on purpose, use **Settings → Configuration → Reset device settings**.
 
 The bootloader and partition table are never touched, so a bad image is still
 recoverable over USB. The board reboots and the page reloads when the flash completes.
 
 For development, PlatformIO can flash over the network too (`upload_protocol = espota`
-in `platformio-local-override.ini`):
+in `platformio-local-override.ini`; only while no users are set up - see
+[Users and access](#users-and-access)):
 
 ```sh
 pio run -e esp32_wemos -t upload     # firmware (esp32_t2can for the ESP32-S3)
@@ -314,6 +371,9 @@ The firmware is an Arduino sketch built with PlatformIO; the web interface in
 [`data/`](data/) is plain Preact + HTM with **no build step**, served gzipped from SPIFFS.
 Versions come from git tags (`git describe`) and show in the UI and at `/version`.
 
+- **Contribute back, don't fork off** - features and fixes are very welcome as pull requests against
+  `dev`, so everyone gets them in one tested version. [CONTRIBUTING.md](CONTRIBUTING.md) shows where a
+  new tile, tab, setting or endpoint plugs in so it stays modular.
 - **Branches** - work lands on `dev`; `dev` → `main` by pull request. Every push to `main` runs the
   tests and then publishes the next `vX.Y` release automatically.
 - **Tests** - `npm test` runs ESLint, checks `data/*.gz` are in sync, and runs the Playwright

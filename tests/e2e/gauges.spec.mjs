@@ -13,8 +13,15 @@ async function addGauge(page, name) {
   await modal.locator('button', { hasText: 'Done' }).click();
 }
 
+// gauges.json v4 also holds the Dashboard's page (named by `dashboard`);
+// these tests are about the gauge pages, so that one is set aside
 async function savedLayout(mock) {
-  return fetch(mock.url + '/gauges.json').then(r => r.json());
+  const data = await fetch(mock.url + '/gauges.json').then(r => r.json());
+  if (data && Array.isArray(data.pages) && data.dashboard != null) {
+    return { ...data, dashPage: data.pages.find(p => String(p.id) === String(data.dashboard)),
+      pages: data.pages.filter(p => String(p.id) !== String(data.dashboard)) };
+  }
+  return data;
 }
 
 // Deterministic "the UI has seen every value set so far": bump udc to a
@@ -38,7 +45,8 @@ test.describe('Gauges grid', () => {
     await page.locator('button', { hasText: 'Save & Done' }).click();
     await expect.poll(async () => (await mock.state()).files).toContain('gauges.json');
     const layout = await savedLayout(mock);
-    expect(layout.v).toBe(3);
+    expect(layout.v).toBe(4);
+    expect(layout.dashPage && layout.dashPage.items.length).toBeGreaterThan(0); // the Dashboard's widgets
     expect(layout.pages).toHaveLength(1);
     expect(layout.pages[0].name).toBe('Main');
     const item = layout.pages[0].items[0];
@@ -200,7 +208,7 @@ test.describe('Gauges grid', () => {
     await modal.locator('select').first().selectOption('line');
     // Line-specific history controls appear; points input is labelled
     await modal.locator('input[min="5"]').fill('60'); // points (min=5 is unique to it)
-    await modal.locator('select').last().selectOption('1000'); // Sample is the last select (Type, Decimals, Sample)
+    await modal.locator('select:not(#tile-move)').last().selectOption('1000'); // Sample: last of Type, Decimals, Sample (Move to page comes after)
     await modal.locator('button', { hasText: 'Done' }).click();
     await page.locator('button', { hasText: 'Save & Done' }).click();
     await expect.poll(async () => {
@@ -419,7 +427,7 @@ test.describe('Gauges grid', () => {
     await expect(page.locator('.page-pill.active')).toHaveText('Main');
     await enterEdit(page);
     await page.locator('button', { hasText: 'Save & Done' }).click();
-    await expect.poll(async () => (await savedLayout(mock)).v).toBe(3);
+    await expect.poll(async () => (await savedLayout(mock)).v).toBe(4);
     const item = (await savedLayout(mock)).pages[0].items[0];
     expect(item.w).toBe(4); // legacy 'lg' size maps to a 4-cell span
     expect(item.max).toBe(500);
@@ -435,7 +443,7 @@ test.describe('Gauges grid', () => {
     await expect(page.locator('.gauge-tile-name', { hasText: 'speed' })).toBeVisible();
     await enterEdit(page);
     await page.locator('button', { hasText: 'Save & Done' }).click();
-    await expect.poll(async () => (await savedLayout(mock)).v).toBe(3);
+    await expect.poll(async () => (await savedLayout(mock)).v).toBe(4);
     const item = (await savedLayout(mock)).pages[0].items[0];
     // 6/12 of the grid stays half the grid: 6 -> 5 of 10 columns, still square
     expect(item.w).toBe(5);

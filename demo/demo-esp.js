@@ -258,6 +258,16 @@
       case '/espupdate-status': return reply({ state: 0 });
       case '/reboot': notice('nothing was rebooted'); return reply('Demo: nothing to reboot');
       case '/reset-inverter': notice('nothing was reset'); return reply('Demo: nothing to reset');
+      // Users & sign-in: the demo runs with sign-in off (no users), like a
+      // fresh device; Settings → Users & Access shows the setup card, but no
+      // account is ever created
+      case '/auth/state': return reply({ enabled: false, user: null, role: 'admin', password_min: 8 });
+      case '/auth/users':
+        if (method === 'POST') { notice('no account was created'); return reply({ error: DEMO_NO + ' (no account is created)' }, 400); }
+        return reply({ enabled: false, me: null, max: 8, users: [] });
+      case '/auth/stream-ticket': return reply({ ticket: '' });
+      case '/auth/login': case '/auth/logout': case '/auth/password':
+        return reply({ error: DEMO_NO + ' (sign-in is off in the demo)' }, 400);
     }
     if (p === '/gauges.json') await gaugesReady;
     const name = p.replace(/^\/+/, '');
@@ -367,6 +377,7 @@
     bar.setAttribute('role', 'note');
     bar.innerHTML = '<b>Live demo</b> · a simulated inverter, not a real device. Nothing is saved: reload to start again. ' +
       (settings.can_mode ? '<a href="?">UART mode</a>' : '<a href="?can=1">Try CAN mode</a>') +
+      ' · <a href="flash/">Install on your ESP32</a>' +
       ' · <a href="https://github.com/wjcloudy/esp32-web-interface" target="_blank" rel="noopener">GitHub</a>';
     document.documentElement.appendChild(bar);
   };
