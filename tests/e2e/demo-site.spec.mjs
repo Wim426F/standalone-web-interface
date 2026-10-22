@@ -8,9 +8,9 @@ import { test, expect, gotoTab } from './fixtures.mjs';
 import { buildDemoSite } from '../../demo/build.mjs';
 import { serveStatic } from '../../demo/serve.mjs';
 
-let server;
+let server, site;
 test.beforeAll(async () => {
-  const site = buildDemoSite(fs.mkdtempSync(path.join(os.tmpdir(), 'oi-demo-e2e-')));
+  site = buildDemoSite(fs.mkdtempSync(path.join(os.tmpdir(), 'oi-demo-e2e-')));
   server = await serveStatic(site, { base: '/esp32-web-interface/' });
 });
 test.afterAll(async () => { if (server) await server.close(); });
@@ -91,4 +91,34 @@ test('updating from GitHub is harmless and says why', async ({ page }) => {
   page.on('dialog', d => d.accept());
   await page.getByRole('button', { name: /download & install/i }).click();
   await expect(page.locator('#oi-demo-banner')).toContainText('Demo mode: no image was downloaded or flashed');
+});
+
+test('the banner links to the browser installer, which offers both channels', async ({ page }) => {
+  const escaped = await openDemo(page);
+  await page.locator('#oi-demo-banner a', { hasText: 'Install on your ESP32' }).click();
+  await expect(page).toHaveURL(/\/esp32-web-interface\/flash\/$/);
+  await expect(page.locator('h1')).toContainText('Install the web interface');
+  // ESP Web Tools is served from the site itself, not a CDN
+  await expect.poll(() => page.evaluate(() => !!window.customElements.get('esp-web-install-button'))).toBe(true);
+  // A local build has no release images: the page says so and won't install
+  await expect(page.locator('#manifest-error')).toBeVisible();
+  await expect(page.locator('#installer button[slot="activate"]')).toBeDisabled();
+
+  // With the images the deploy bundles (demo/flash-firmware.mjs)
+  const manifest = (version) => ({ name: 'OpenInverter Web Interface', version, new_install_prompt_erase: true,
+    builds: [{ chipFamily: 'ESP32', parts: [{ path: 'fw/' + version + '/esp32_' + version + '-0x000.bin', offset: 0 }] }] });
+  fs.writeFileSync(path.join(site, 'flash', 'manifest-stable.json'), JSON.stringify(manifest('v4.24')));
+  fs.writeFileSync(path.join(site, 'flash', 'manifest-dev.json'), JSON.stringify(manifest('v4.25-dev.12')));
+  await page.evaluate(() => { try { localStorage.removeItem('oi-flash-channel'); } catch (e) {} });
+  await page.reload();
+  await expect(page.locator('#ver-stable')).toHaveText('v4.24');
+  await expect(page.locator('#ver-dev')).toHaveText('v4.25-dev.12');
+  await expect(page.locator('#manifest-error')).toBeHidden();
+  await expect(page.locator('#installer')).toHaveAttribute('manifest', 'manifest-stable.json');
+  await expect(page.locator('#installer button[slot="activate"]')).toBeEnabled();
+  await page.locator('#channel label', { hasText: 'Dev' }).click();
+  await expect(page.locator('#installer')).toHaveAttribute('manifest', 'manifest-dev.json');
+  await expect(page.locator('#channel-note')).toContainText('v4.25-dev.12');
+  // Only the manifests missing in the first half may have 404'd
+  expect(escaped.filter(e => !/\/flash\/manifest-(stable|dev)\.json$/.test(e))).toEqual([]);
 });

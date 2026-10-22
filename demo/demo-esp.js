@@ -377,6 +377,7 @@
     bar.setAttribute('role', 'note');
     bar.innerHTML = '<b>Live demo</b> · a simulated inverter, not a real device. Nothing is saved: reload to start again. ' +
       (settings.can_mode ? '<a href="?">UART mode</a>' : '<a href="?can=1">Try CAN mode</a>') +
+      ' · <a href="flash/">Install on your ESP32</a>' +
       ' · <a href="https://github.com/wjcloudy/esp32-web-interface" target="_blank" rel="noopener">GitHub</a>';
     document.documentElement.appendChild(bar);
   };

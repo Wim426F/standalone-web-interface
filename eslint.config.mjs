@@ -80,7 +80,7 @@ export default [
   },
   {
     // Live demo transport + data: plain browser scripts loaded before app.js
-    files: ['demo/*.js'],
+    files: ['demo/*.js', 'demo/flash/*.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',

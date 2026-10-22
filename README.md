@@ -96,7 +96,12 @@ phone it installs to the home screen like an app.
    `esp32` is the classic ESP32 (e.g. Wemos D1 Mini ESP32), `esp32s3` the ESP32-S3 (LilyGO T-2CAN). Every
    push to `dev` also builds images as [workflow artifacts](https://github.com/wjcloudy/esp32-web-interface/actions/workflows/build.yml).
 
-2. **Flash it** at offset `0x0` with [ESP Web Tools / esptool-js](https://espressif.github.io/esptool-js/) in the browser, or `esptool.py`:
+2. **Flash it from your browser** with the **[installer](https://wjcloudy.github.io/esp32-web-interface/flash/)**:
+   plug the board in by USB, pick Stable or Dev and press Install (Chrome or Edge on a computer). It picks the right
+   image for your chip and needs no download. It's built on [ESP Web Tools](https://github.com/esphome/esp-web-tools)
+   and hosted with the [live demo](https://wjcloudy.github.io/esp32-web-interface/).
+
+   Or flash the image yourself at offset `0x0` with `esptool.py`:
 
    ```sh
    esptool.py --chip esp32   write_flash 0x0 esp32_vX.Y-0x000.bin     # classic ESP32

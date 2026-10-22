@@ -19,6 +19,12 @@ without an in-file license banner, so their attribution is recorded here.
 | Inter Tight font (`data/fonts/intertight.woff2`) | @fontsource-variable 5.2.5, Latin subset | SIL OFL 1.1 | © The Inter Tight Project Authors | https://github.com/googlefonts/inter-tight |
 | JetBrains Mono font (`data/fonts/jbmono.woff2`) | @fontsource-variable 5.2.5, Latin subset | SIL OFL 1.1 | © The JetBrains Mono Project Authors | https://github.com/JetBrains/JetBrainsMono |
 
+The project's GitHub Pages site (live demo and browser installer, not the device image) also serves:
+
+| Component | Version | License | Copyright | Source |
+|---|---|---|---|---|
+| ESP Web Tools (`flash/ewt/`, from npm `esp-web-tools`), including Espressif's esptool-js | 10.4.0 | Apache-2.0 | © ESPHome contributors; © Espressif Systems | https://github.com/esphome/esp-web-tools |
+
 NoSleep.js embeds two short, blank video clips (base64 `data:` URIs, generated
 with ffmpeg) used only to keep the screen awake on browsers without the Screen
 Wake Lock API. They contain no third-party media.
