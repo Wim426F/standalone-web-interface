@@ -4478,8 +4478,10 @@ const IndicatorLamp = ({ value, min, max, color, enums, invert, px, bare }) => {
     <div class="ind-wrap" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:${Math.round(px * 0.09)}px">
       <div class="ind-lamp ${on ? 'on' : ''}" style=${{
         width: d + 'px', height: d + 'px', borderRadius: '50%',
-        background: on ? col : 'var(--surface)',
-        border: '2px solid ' + (on ? col : 'var(--border2)'),
+        // A bare lamp is invisible while off, so a lamp drawn in a background
+        // picture shows through and only glows when lit
+        background: on ? col : (bare ? 'transparent' : 'var(--surface)'),
+        border: '2px solid ' + (on ? col : (bare ? 'transparent' : 'var(--border2)')),
         boxShadow: on ? ('0 0 ' + Math.round(px * 0.12) + 'px ' + col) : 'none',
         transition: 'background .15s, box-shadow .15s',
       }}></div>

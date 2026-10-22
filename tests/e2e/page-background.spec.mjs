@@ -8,7 +8,7 @@ import { test, expect, openApp, gotoTab } from './fixtures.mjs';
 // it stay there at any width. Clear tiles sit on it with no card at all.
 
 const DATA = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'data');
-const PNG = fs.readFileSync(path.join(DATA, 'example-vehicle.png'));
+const PNG = fs.readFileSync(path.join(DATA, 'example-badge.png'));
 const seedImage = (mock, name) => fetch(mock.url + '/__test/put-file?name=' + name, { method: 'POST', body: PNG });
 const LAYOUT = (bg) => ({ v: 3, pages: [{ id: 1, name: 'Car', bg, items: [
   { id: 1, name: 'udc', type: 'indicator', min: 0, max: 1, x: 2, y: 2, w: 1, h: 1, transparent: true },
@@ -113,9 +113,9 @@ test.describe('Page backgrounds', () => {
     await gotoTab(page, 'Gauges');
     await page.locator('.page-pill', { hasText: 'Vehicle' }).click();
     await expect.poll(() => bgLoaded(page)).toBe(true);
-    await expect(page.locator('#gauges .gauge-tile.tile-clear')).toHaveCount(5);
+    await expect(page.locator('#gauges .gauge-tile.tile-clear')).toHaveCount(7);
     // Its lamps are Lamp only: just the light, no name row or ON/OFF caption
-    await expect(page.locator('#gauges .ind-lamp')).toHaveCount(3);
+    await expect(page.locator('#gauges .ind-lamp')).toHaveCount(5);
     await expect(page.locator('#gauges .gauge-tile:has(.ind-lamp) .gauge-tile-name')).toHaveCount(0);
     await expect(page.locator('#gauges .ind-wrap .g-unit')).toHaveCount(0);
   });
