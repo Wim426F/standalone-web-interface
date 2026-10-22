@@ -380,6 +380,10 @@
       ' · <a href="flash/">Install on your ESP32</a>' +
       ' · <a href="https://github.com/wjcloudy/esp32-web-interface" target="_blank" rel="noopener">GitHub</a>';
     document.documentElement.appendChild(bar);
+    // The app's fixed chrome starts below the banner, however many lines it wraps to
+    const fit = () => document.documentElement.style.setProperty('--oi-demo-h', bar.offsetHeight + 'px');
+    fit();
+    if (window.ResizeObserver) new ResizeObserver(fit).observe(bar);
   };
   if (document.body) banner(); else document.addEventListener('DOMContentLoaded', banner);
 

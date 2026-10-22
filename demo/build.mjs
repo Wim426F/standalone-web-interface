@@ -20,13 +20,16 @@ const DEMO = path.join(ROOT, 'demo');
 // Device-only pages and the PWA plumbing stay out of the demo
 const SKIP = new Set(['sw.js', 'manifest.json']);
 
+// A strip across the top that pushes the app down (demo-esp.js sets
+// --oi-demo-h to its height), so it never covers the nav or the gauges.
+// Under the modals (z 100) and the phone bottom bar (z 70)
 const BANNER_CSS = `
-#oi-demo-banner{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:10000;
-  max-width:calc(100vw - 24px);padding:7px 16px;border-radius:999px;font:500 12.5px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  background:#f5b301;color:#1d1600;box-shadow:0 6px 24px rgba(0,0,0,.35);text-align:center}
+#oi-demo-banner{position:fixed;top:0;left:0;right:0;z-index:65;
+  padding:6px 12px;padding-top:max(6px,env(safe-area-inset-top));font:500 12.5px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  background:#f5b301;color:#1d1600;text-align:center}
 #oi-demo-banner a{color:inherit;font-weight:700}
 #oi-demo-banner .oi-demo-notice{font-weight:700;margin-top:2px}
-@media (max-width:600px){#oi-demo-banner{left:0;right:0;bottom:0;transform:none;max-width:none;border-radius:0;padding:6px 10px}}`;
+#navbar,#content-wrapper{top:var(--oi-demo-h,0px)!important}`;
 
 export function buildDemoSite(out = path.join(ROOT, '_site')) {
   fs.rmSync(out, { recursive: true, force: true });
