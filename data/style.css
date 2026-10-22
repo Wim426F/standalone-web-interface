@@ -866,7 +866,12 @@ td { font-variant-numeric: tabular-nums; }
 .gauge-tile-name { font-weight: 600; font-size: .82rem; margin: 2px 0; max-width: 95%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* transparent tiles: the gauge floats on the page with no card chrome
    (the edit-mode dashed outline still shows, so they stay manipulable) */
-.gauge-tile.tile-clear { background: transparent; border-color: transparent; }
+.gauge-tile.tile-clear { background: transparent; border-color: transparent; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+/* Page background: behind the tiles, pinned to the grid's box (full width,
+   bg.rows x --gs-cell tall) so it moves and scales with them */
+.grid-stack > .page-bg { position: absolute; top: 0; left: 0; right: 0; z-index: 0; pointer-events: none; }
+.page-bg img { display: block; width: 100%; height: 100%; }
+.grid-stack > .page-bg-missing { position: absolute; top: 0; left: 0; margin: 4px 6px; font-size: .72rem; color: var(--text3); pointer-events: none; }
 /* view-mode gauge area: no text selection, so a mouse/touch page-swipe drag
    doesn't highlight tile labels/values as it moves. touch-action: pan-y keeps
    vertical scrolling but hands HORIZONTAL touch gestures to our swipe handler
@@ -1106,8 +1111,8 @@ button.danger { color: var(--red); background: color-mix(in srgb, var(--red) 7%,
    never stretches the tile or makes it scroll, grid or phone stack alike)
    and object-fit letterboxes or crops it into that box */
 .gauge-tile.widget-tile:has(.wt-image) { padding: 4px; overflow: hidden; }
-/* Clear: just the picture, edge to edge, without the card's shadow either */
-.gauge-tile.widget-tile.tile-clear:has(.wt-image) { padding: 0; box-shadow: none; }
+/* Clear: just the picture, edge to edge */
+.gauge-tile.widget-tile.tile-clear:has(.wt-image) { padding: 0; }
 .wt-image { gap: 4px; align-items: center; justify-content: center; }
 .wt-image .img-link { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; width: 100%; }
 .wt-image .img-pic { display: block; flex: 1 1 0; min-height: 0; width: 100%; height: 0; }

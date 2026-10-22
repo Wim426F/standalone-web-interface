@@ -1731,9 +1731,11 @@ async function readImages(names) {
   }));
   return out;
 }
-// The uploaded images a gauges.json shows, on every page
+// The uploaded images a gauges.json shows, on every page: image tiles and
+// page backgrounds
 const layoutImages = (gauges) => [...new Set(((gauges && gauges.pages) || [])
-  .flatMap(p => (p.items || []).filter(g => g.type === 'image' && isUserImage(g.file)).map(g => g.file)))];
+  .flatMap(p => [...(p.items || []).filter(g => g.type === 'image').map(g => g.file), p.bg && p.bg.file])
+  .filter(isUserImage))];
 const blobToDataUrl = (blob) => new Promise((resolve, reject) => {
   const fr = new FileReader();
   fr.onload = () => resolve(fr.result);
@@ -4424,6 +4426,7 @@ function migrateGauges(data) {
         name: p.name || 'Page ' + (pi + 1),
         cond: (p.cond && p.cond.name) ? p.cond : undefined,
         layout: p.layout === 'stack' ? 'stack' : undefined,
+        bg: pageBg(p.bg),
         items: (Array.isArray(p.items) ? p.items : []).map(g => {
           const type = g.type || 'radial';
           const floor = tileFloor(type);
@@ -4991,9 +4994,10 @@ const ImageTile = ({ g, editing }) => {
     ${g.label && html`<div class="img-caption">${g.label}</div>`}`;
 };
 
-// The image section of the tile settings: pick a file already on the
-// device or upload one (which is then picked)
-const ImageSettings = ({ cfg, update }) => {
+// Pick a file already on the device or upload one (which is then picked).
+// Shared by image tiles and page backgrounds; `id` prefixes the controls.
+// onPick(name, v): v is set for a fresh upload (the cache-busting stamp)
+const ImagePicker = ({ id, file, onPick }) => {
   const [names, setNames] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -5001,37 +5005,41 @@ const ImageSettings = ({ cfg, update }) => {
     .then(list => setNames(list.map(f => String(f.name).replace(/^\/+/, '')).filter(isImageFile).sort()))
     .catch(() => setNames([]));
   useEffect(() => { refresh(); }, []);
-  const opts = names ? [...new Set([...(cfg.file ? [cfg.file] : []), ...names])] : (cfg.file ? [cfg.file] : []);
+  const opts = names ? [...new Set([...(file ? [file] : []), ...names])] : (file ? [file] : []);
   const onFile = async (e) => {
-    const file = e.target.files && e.target.files[0];
+    const f = e.target.files && e.target.files[0];
     e.target.value = ''; // the same file again is a new upload
-    if (!file) return;
+    if (!f) return;
     setBusy(true); setErr('');
     try {
-      const name = await uploadImage(file);
-      update('file', name);
-      update('v', Date.now());
+      const name = await uploadImage(f);
+      onPick(name, Date.now());
       await refresh();
       showToast('Uploaded ' + name, 'ok');
     } catch (ex) { setErr(ex.message || String(ex)); }
     setBusy(false);
   };
   return html`
-    <p class="modal-sect">Image</p>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <label style="width:4.5em">File</label>
-      <select id="image-file" value=${cfg.file || ''} onchange=${e => update('file', e.target.value || undefined)}
+      <select id=${id + '-file'} value=${file || ''} onchange=${e => onPick(e.target.value || undefined)}
         style="width:auto;min-width:11em;max-width:100%;padding:5px 30px 5px 8px">
         <option value="">${names ? '(none)' : 'Loading…'}</option>
         ${opts.map(n => html`<option value=${n}>${n}</option>`)}
       </select>
       <${Gate} need="operator">
-        <input id="image-upload" type="file" accept=${Object.keys(IMG_TYPES).join(',')} hidden disabled=${busy} onchange=${onFile} />
-        <label class="butt" for="image-upload" style="font-size:.75rem;padding:4px 12px;margin:0" aria-disabled=${busy || undefined}>
+        <input id=${id + '-upload'} type="file" accept=${Object.keys(IMG_TYPES).join(',')} hidden disabled=${busy} onchange=${onFile} />
+        <label class="butt" for=${id + '-upload'} style="font-size:.75rem;padding:4px 12px;margin:0" aria-disabled=${busy || undefined}>
           <${Icon} n="upload" />${busy ? 'Uploading…' : 'Upload'}</label>
       </${Gate}>
     </div>
-    ${err && html`<p id="image-error" class="widget-note" style="color:var(--red)">${err}</p>`}
+    ${err && html`<p id=${id + '-error'} class="widget-note" style="color:var(--red)">${err}</p>`}`;
+};
+
+// The image section of the tile settings
+const ImageSettings = ({ cfg, update }) => html`
+    <p class="modal-sect">Image</p>
+    <${ImagePicker} id="image" file=${cfg.file} onPick=${(name, v) => { update('file', name); if (v) update('v', v); }} />
     <div style="display:flex;gap:8px;align-items:center">
       <label style="width:4.5em">Fit</label>
       <select id="image-fit" value=${cfg.fit === 'cover' ? 'cover' : 'contain'} onchange=${e => update('fit', e.target.value === 'cover' ? 'cover' : undefined)}
@@ -5047,10 +5055,73 @@ const ImageSettings = ({ cfg, update }) => {
     </div>
     <p style="font-size:.72rem;color:var(--text3);margin:0">PNG, JPEG, WebP or GIF up to ${IMG_MAX / 1024} KB, stored on the device as ${IMG_PREFIX}….
       The Label above is shown as a caption; Clear drops the card behind the image.</p>`;
+
+// ---- Page backgrounds: one picture behind a gauge page's tiles (a car
+// with borderless lamp tiles over its real lamps). It is pinned to the
+// grid's own coordinates: the full grid width and `rows` cells tall, in the
+// cell height the grid itself uses (--gs-cell, set with it in
+// applyCellSize), so a tile over a spot in the picture stays over that spot
+// at every width. Stored on the page: bg { file, v?, fit?, pos?, opacity?, rows }
+const BG_MAX_ROWS = 20;
+function pageBg(bg) {
+  if (!bg || typeof bg !== 'object' || !bg.file) return undefined;
+  const op = Math.round(Number(bg.opacity));
+  return {
+    file: String(bg.file), v: bg.v || undefined,
+    fit: bg.fit === 'cover' ? 'cover' : undefined,
+    pos: bg.pos === 'center' ? 'center' : undefined, // top-left otherwise
+    opacity: op >= 10 && op < 100 ? op : undefined,   // percent; full when unset
+    rows: Math.max(1, Math.min(BG_MAX_ROWS, Math.round(Number(bg.rows)) || 6)),
+  };
+}
+// A missing file fails quietly: no picture, and a note only while editing
+const PageBackground = ({ bg, editing }) => {
+  const [brokenSrc, setBrokenSrc] = useState(null);
+  const src = bg.file + (bg.v ? '?v=' + bg.v : '');
+  if (brokenSrc === src) return editing ? html`<p class="page-bg-missing">Background image not found: ${bg.file}</p>` : null;
+  return html`<div class="page-bg" aria-hidden="true" style=${'height:calc(var(--gs-cell, 60px) * ' + bg.rows + ')'}>
+    <img src=${src} alt="" draggable=${false} onerror=${() => setBrokenSrc(src)}
+      style=${'object-fit:' + (bg.fit || 'contain') + ';object-position:' + (bg.pos === 'center' ? 'center' : 'left top')
+        + (bg.opacity ? ';opacity:' + bg.opacity / 100 : '')} />
+  </div>`;
+};
+// The page settings' Background section; Rows starts at the page's current
+// height so the picture covers what's already there
+const BackgroundSettings = ({ page, update }) => {
+  const bg = page.bg;
+  const pageRows = page.items.reduce((m, g) => Math.max(m, (g.y || 0) + (g.h || 1)), 0) || 6;
+  const sel = 'width:auto;min-width:9em;padding:4px 28px 4px 8px';
+  return html`
+    <div id="page-bg-settings" style="display:flex;flex-direction:column;gap:6px;font-size:.8rem">
+      <${ImagePicker} id="bg" file=${bg && bg.file}
+        onPick=${(name, v) => update(name ? { ...(bg || { rows: pageRows }), file: name, v: v || (bg && bg.v) } : null)} />
+      ${bg && html`
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <label style="width:4.5em">Fit</label>
+          <select id="bg-fit" value=${bg.fit || 'contain'} onchange=${e => update({ ...bg, fit: e.target.value })} style=${sel}>
+            <option value="contain">Whole image</option>
+            <option value="cover">Fill (crops)</option>
+          </select>
+          <select id="bg-pos" value=${bg.pos || 'top-left'} onchange=${e => update({ ...bg, pos: e.target.value })} style=${sel}>
+            <option value="top-left">Top left</option>
+            <option value="center">Centred</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <label style="width:4.5em">Rows</label>
+          <input id="bg-rows" type="number" min="1" max=${BG_MAX_ROWS} value=${bg.rows}
+            oninput=${e => { const n = parseInt(e.target.value); if (n > 0) update({ ...bg, rows: n }); }} style="width:5em;padding:4px 6px" />
+          <label>Opacity</label>
+          <input id="bg-opacity" type="range" min="10" max="100" step="5" value=${bg.opacity || 100}
+            oninput=${e => update({ ...bg, opacity: parseInt(e.target.value) })} style="flex:1;min-width:5em" />
+        </div>
+        <button onclick=${() => update(null)} style="font-size:.72rem;padding:3px 10px;width:auto;align-self:flex-start;color:var(--red)"><${Icon} n="x" size=${11} />Remove background</button>`}
+      <p class="edit-help" style="font-size:.72rem;color:var(--text3);margin:0">A picture behind this page, ${GRID_COLS} cells wide and Rows cells tall. It scales with the tiles, so a tile placed over a spot stays on it; tiles set to Clear sit on the picture with no card.</p>
+    </div>`;
 };
 
 // While editing, a widget is inert: a tap configures it instead of firing it
-const WidgetTile =({ g, value, unit, enums, nameVals, editing }) => html`
+const WidgetTile = ({ g, value, unit, enums, nameVals, editing }) => html`
   <div class="widget-body wt-${g.type}" inert=${editing || undefined}>
     ${g.type === 'status' ? html`<${StatusTile} g=${g} nameVals=${nameVals} />`
       : g.type === 'metric' ? html`<${MetricTile} g=${g} value=${value} unit=${unit} enums=${enums} />`
@@ -5284,12 +5355,16 @@ const Gauges = ({ dash = false }) => {
   const shownPages = pages.filter(p => (dash ? p.id === dashId : p.id !== dashId));
   const page = pages.find(p => p.id === activePage) || shownPages[0] || pages[0];
   const items = page.items;
-  // On phones a 'stack' page lists its tiles in reading order
-  const stacked = page.layout === 'stack' && narrow && !editing;
+  // On phones a 'stack' page lists its tiles in reading order, unless it
+  // has a background: reflowed tiles couldn't stay on their spots in it
+  const stacked = page.layout === 'stack' && narrow && !editing && !page.bg;
   const stackRef = useRef(false);
   stackRef.current = page.layout === 'stack';
   const itemsRef = useRef(items);
   itemsRef.current = items;
+  const bgRows = page.bg ? page.bg.rows : 0;
+  const bgRowsRef = useRef(bgRows);
+  bgRowsRef.current = bgRows;
   const pagesRef = useRef(pages);
   pagesRef.current = pages;
   const editingRef = useRef(editing);
@@ -5392,7 +5467,7 @@ const Gauges = ({ dash = false }) => {
       const availW = availWidth();
       if (!(availW > 0)) return 1;
       let cell = availW / GRID_COLS;
-      const rows = itemsRef.current.reduce((m, g) => Math.max(m, (g.y || 0) + (g.h || 1)), 0);
+      const rows = itemsRef.current.reduce((m, g) => Math.max(m, (g.y || 0) + (g.h || 1)), bgRowsRef.current);
       // A 'stack' page (the Dashboard) reads like a page and scrolls; only
       // gauge pages shrink to fit the screen height, and not on phones,
       // where the top and bottom bars leave too little height for it
@@ -5416,11 +5491,13 @@ const Gauges = ({ dash = false }) => {
         el.style.maxWidth = ''; el.style.marginLeft = ''; el.style.marginRight = '';
       }
       grid.cellHeight(cell);
+      el.style.setProperty('--gs-cell', cell + 'px'); // the page background's row unit
     };
     const grid = GridStack.init({
       column: GRID_COLS,
       cellHeight: squareCell(),
       margin: MARGIN,
+      minRow: bgRowsRef.current, // at least as tall as the page background
       float: true,
       animate: false,
       staticGrid: !editing,
@@ -5489,11 +5566,12 @@ const Gauges = ({ dash = false }) => {
       ro.disconnect();
       window.removeEventListener('resize', applyCellSize);
       el.style.maxWidth = ''; el.style.marginLeft = ''; el.style.marginRight = '';
+      el.style.removeProperty('--gs-cell');
       grid.destroy(false); gridApi.current = null;
     };
     // types join: a type switch (e.g. radial -> indicator) changes the
     // engine minimums, so re-init to reapply them
-  }, [activePage, layoutGen, items.length, editing, pages.length, items.map(g => g.type).join(), stacked]);
+  }, [activePage, layoutGen, items.length, editing, pages.length, items.map(g => g.type).join(), stacked, bgRows]);
 
   // Enter edit mode, snapshotting the layout so Cancel can restore it
   const startEditing = () => {
@@ -5717,6 +5795,8 @@ const Gauges = ({ dash = false }) => {
     }));
   const clearPageCond = () =>
     setPages(ps => ps.map(p => p.id !== activePage ? p : { ...p, cond: undefined }));
+  const updatePageBg = (bg) =>
+    setPages(ps => ps.map(p => p.id !== activePage ? p : { ...p, bg: pageBg(bg) }));
 
   // High-rate spot value fetching for the active page (pauses main json refresh)
   useEffect(() => {
@@ -5895,10 +5975,12 @@ const Gauges = ({ dash = false }) => {
           <button onclick=${() => updatePageCond('name', '')} style="font-size:.75rem;padding:4px 10px;width:auto"><${Icon} n="plus" />Add condition</button>
           <p class="edit-help" style="font-size:.72rem;color:var(--text3);margin:.25rem 0 0">A condition switches to this page automatically while a value is in range — e.g. opmode 3 to 3, or lasterr 0 to 0 inverted (any error).</p>
         `}
+        <h3 class="underline">Page background</h3>
+        <${BackgroundSettings} page=${page} update=${updatePageBg} />
         <p class="edit-help" style="font-size:.72rem;color:var(--text3);margin:.25rem 0 0">Tap a tile to configure its value, type, colour and range — or to duplicate or remove it.</p>
         <h3 class="underline">Starter Layout</h3>
         <button onclick=${loadSampleLayout} style="font-size:.75rem;padding:4px 10px"><${Icon} n="cloud" />Load sample layout</button>
-        <p class="edit-help" style="font-size:.72rem;color:var(--text3);margin:.25rem 0 0">Six example pages (Driving, Battery, Temps, Charging, Debug, Controls) using standard value names — every gauge type included. Replaces your current gauges after confirmation.</p>
+        <p class="edit-help" style="font-size:.72rem;color:var(--text3);margin:.25rem 0 0">Seven example pages (Driving, Battery, Temps, Charging, Debug, Controls, Vehicle) using standard value names — every gauge type included, and a page background with lamp tiles over it. Replaces your current gauges after confirmation.</p>
         </div>
         `}
       </div>
@@ -5946,8 +6028,9 @@ const Gauges = ({ dash = false }) => {
           `)}
           ${editing && html`<button class="page-pill" title="Add page" onclick=${addPage}>+</button>`}
         </div>`}
-        ${items.length === 0 && !editing && html`<p style="color:var(--text3);font-size:.85rem;text-align:center;padding:2rem 0">Click Edit Layout to add a gauge.</p>`}
+        ${items.length === 0 && !editing && !page.bg && html`<p style="color:var(--text3);font-size:.85rem;text-align:center;padding:2rem 0">Click Edit Layout to add a gauge.</p>`}
         <div class=${'grid-stack' + (stacked ? ' stacked' : '')} ref=${gridRef} key=${'page-' + activePage + '-g' + layoutGen}>
+          ${page.bg && html`<${PageBackground} key=${'bg-' + page.bg.file} bg=${page.bg} editing=${editing} />`}
           ${items.map(g => {
             const sv = state.spotValues && state.spotValues[g.name];
             // Formula tiles carry their own unit text (there's no spot value
