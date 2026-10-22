@@ -3656,7 +3656,7 @@ const Settings = () => {
     <div id="settings" class="tabdiv main-content" style="display:flex">
       <div class="main-left">
         <h2>Settings</h2>
-        <div id="settings-subtabs" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:.75rem">
+        <div id="settings-subtabs" class="seg" style="margin-bottom:.75rem">
           <button class="page-pill ${subTab === 'device' ? 'active' : ''}" onclick=${() => pickSubTab('device')}>Device & Connection</button>
           <button class="page-pill ${subTab === 'web' ? 'active' : ''}" onclick=${() => pickSubTab('web')}>Web Interface</button>
           <button class="page-pill ${subTab === 'config' ? 'active' : ''}" onclick=${() => pickSubTab('config')}>Configuration</button>
@@ -5521,7 +5521,7 @@ const Gauges = () => {
             ${!editing && can('operator') && html`<button onclick=${startEditing} style="font-size:.75rem;padding:4px 12px"><${Icon} n="edit" />Edit Layout</button>`}
           </div>
         </div>
-        <div id="gauge-pages" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:.6rem">
+        <div id="gauge-pages" class="seg" style="margin-bottom:.6rem">
           ${pages.map(p => html`
             <button key=${p.id} class="page-pill ${p.id === activePage ? 'active' : ''} ${editing ? 'draggable' : ''}"
               draggable=${editing} onclick=${() => setActivePage(p.id)}

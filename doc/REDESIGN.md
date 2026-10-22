@@ -26,8 +26,8 @@ cell min/max are illustrations of what a widget *can* show, not existing feature
 | Phase | State | Checkpoint |
 |---|---|---|
 | 1. Tokens and fonts | **Done** | Neutral `#070708` ground, glass surfaces, 20/14/9 px radii, `--grad-signature`, new `--grad-edge`; light theme on Homestead's greys with deeper status colours. Inter Tight + JetBrains Mono bundled (`data/fonts/`, 85 KB, short names because SPIFFS paths max out at 31 characters); firmware serves `.woff2` as `font/woff2` (+40 bytes flash). Numbers now use the mono face. 245/245 E2E, screenshots regenerated. |
-| 2. Components | Next | |
-| 3. Shared widget system | Planned | |
+| 2. Components | **Done** | Glass cards (`--card-bg`) with the gradient edge only on hero cards (`.edge`, `.hero-card`) plus a running aurora (`.hero-card:has(.pill.active)`); sidebar selection is Homestead's pill (`--on-bg`/`--on-fg`) lit by `--glow-pri`; neutral glass buttons, `button.primary` = the selected-pill colours, `button.danger` red tint; gradient `Run` pill, outlined info/warn pills; mono uppercase labels (h3, metric labels, table heads); 12 px fields; gauge tiles share the card glass; page switchers are a segmented control (`.seg` on `#gauge-pages`, `#settings-subtabs`); reduced-motion and reduced-transparency honoured. Both themes checked in screenshots. 245 E2E pass (one existing timing flake in `gauge-extras` under full parallel load: 10/10 alone). Not yet done: gauge arcs keep each tile's own colour (the signature gradient as the default tile colour comes with Phase 3's new tile types). |
+| 3. Shared widget system | Next | |
 | 4. App chrome | Planned | |
 | 5. Polish | Planned | |
 
