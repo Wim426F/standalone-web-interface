@@ -24,7 +24,8 @@ async function json(url) {
   return r.json();
 }
 
-// Full-flash images of one release, downloaded once per tag
+// Full-flash images of one release. Only this repo's release downloads are
+// fetched, and each lands at a path built from the checked tag and asset name
 async function bundle(release, flashDir) {
   const tag = release.tag_name;
   if (!/^v[0-9][0-9A-Za-z.-]*$/.test(tag)) throw new Error('unexpected tag ' + tag);
@@ -32,14 +33,13 @@ async function bundle(release, flashDir) {
   for (const asset of release.assets) {
     const m = IMAGE.exec(asset.name);
     if (!m) continue;
+    const url = `https://github.com/${REPO}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(asset.name)}`;
     const rel = 'fw/' + tag + '/' + asset.name;
+    const r = await fetch(url, { headers: { 'User-Agent': headers['User-Agent'] } });
+    if (!r.ok) throw new Error(asset.name + ': HTTP ' + r.status);
     const dest = path.join(flashDir, rel);
-    if (!fs.existsSync(dest)) {
-      const r = await fetch(asset.browser_download_url, { headers: { 'User-Agent': headers['User-Agent'] } });
-      if (!r.ok) throw new Error(asset.name + ': HTTP ' + r.status);
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.writeFileSync(dest, Buffer.from(await r.arrayBuffer()));
-    }
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, Buffer.from(await r.arrayBuffer()));
     builds.push({ chipFamily: CHIP[m[1]], parts: [{ path: rel, offset: 0 }] });
   }
   if (!builds.length) throw new Error(tag + ' has no *-0x000.bin images');
