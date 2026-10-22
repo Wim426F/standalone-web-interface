@@ -1240,3 +1240,11 @@ body.kiosk #topbar, body.kiosk #bottombar { display: none !important; }
   #gauges-head button { min-width: 40px; min-height: 36px; justify-content: center; padding: 4px 10px !important; }
   .readonly-bar { bottom: calc(70px + env(safe-area-inset-bottom)); }
 }
+
+/* Native controls (a select's popup list, scrollbars, date pickers) follow
+   the theme: without this the browser draws a light popup with the dark
+   theme's light text, so the options read washed out */
+:root { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { color-scheme: dark; } }
+option { background: var(--surface2); color: var(--text); }
