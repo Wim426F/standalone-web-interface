@@ -156,7 +156,10 @@ const api = {
     try {
       const r = await fetch(url, opts);
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      return await r.text();
+      const text = await r.text();
+      // Flash and RAM agree again after a save or a restore from flash
+      if (/^(save|load)\s*$/.test(cmd)) window.dispatchEvent(new Event('oi-params-saved'));
+      return text;
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -193,6 +196,7 @@ const api = {
     // Every UI-issued 'set' flows through here — the one place the change
     // log can see them all (table edits, presets, action/toggle/slider tiles)
     try { logParamSet(name, value, ok); } catch (e) {}
+    if (ok) window.dispatchEvent(new Event('oi-param-set')); // live, not yet in flash
     return { ok, reply };
   },
 
@@ -331,6 +335,7 @@ const initialState = {
   firmwareVersion: '',
   fetchAge: 0,
   activeTab: parseHash().tab || 'dashboard',
+  unsavedParams: 0, // parameter sets since the last save/restore (Parameters save bar)
   refreshRate: 3000, // -1 = off, else ms interval
   paramFavorites: [],
   spotFavorites: [],
@@ -545,6 +550,8 @@ function reducer(state, action) {
       const fc = state.failedFetchCount + 1;
       return { ...state, failedFetchCount: fc, commError: fc >= 2, fetching: false,
                canConnected: state.canMode ? (fc < 2 && state.canConnected) : false };
+    case 'PARAMS_UNSAVED':
+      return { ...state, unsavedParams: action.payload === 0 ? 0 : state.unsavedParams + 1 };
     case 'SET_ACTIVE_TAB':
       return { ...state, activeTab: action.payload };
     case 'SET_UPDATE_TAG':
@@ -749,9 +756,21 @@ const tabs = [
   { id: 'support', label: 'Support', icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' },
 ];
 
+// Sidebar groups (Homestead-style section labels)
+const TAB_GROUPS = [
+  ['Monitor', ['dashboard', 'gauges', 'spotvalues', 'plot', 'logger']],
+  ['Configure', ['parameters', 'canmapping']],
+  ['Device', ['files', 'update', 'settings', 'support']],
+];
+const tabGroupOf = (id) => (TAB_GROUPS.find(([, ids]) => ids.includes(id)) || ['', []])[0];
+// Phone bottom bar: the four most used, the rest behind More
+const BOTTOM_TABS = [['dashboard', 'Home'], ['gauges', 'Gauges'], ['spotvalues', 'Values'], ['parameters', 'Params']];
+const closeNavDrawer = () => document.body.classList.remove('nav-open');
+
 const Navbar = () => {
   const { state, dispatch } = useContext(Store);
   const active = state.activeTab;
+  const go = (id) => { closeNavDrawer(); dispatch({ type: 'SET_ACTIVE_TAB', payload: id }); };
 
   return html`
     <aside id="navbar">
@@ -771,13 +790,20 @@ const Navbar = () => {
             <path stroke="#ff6b6b" opacity=".95" transform="translate(24 0)" d="M-30 24 C -24 11, -18 11, -12 24 C -6 37, 0 37, 6 24 C 12 11, 18 11, 24 24 C 30 37, 36 37, 42 24 C 48 11, 54 11, 60 24" />
           </g>
         </svg>
+        <span class="brand-name navbar-text">OpenInverter</span>
       </div>
-      ${tabs.map(t => html`
-        <div class="tablink ${active === t.id ? 'active' : ''}" onclick=${() => dispatch({ type: 'SET_ACTIVE_TAB', payload: t.id })}>
-          <span class="tab-icon" dangerouslySetInnerHTML=${{ __html: t.icon }}></span>
-          <span class="navbar-text">${t.label}</span>
-        </div>
+      <nav aria-label="Sections">
+      ${TAB_GROUPS.map(([group, ids]) => html`
+        <div class="navlbl navbar-text" key=${group}>${group}</div>
+        ${ids.map(id => tabs.find(t => t.id === id)).filter(Boolean).map(t => html`
+          <button type="button" key=${t.id} class="tablink ${active === t.id ? 'active' : ''}" aria-current=${active === t.id ? 'page' : undefined}
+            title=${t.label} onclick=${() => go(t.id)}>
+            <span class="tab-icon" dangerouslySetInnerHTML=${{ __html: t.icon }}></span>
+            <span class="navbar-text">${t.label}</span>
+          </button>
+        `)}
       `)}
+      </nav>
       ${state.deviceName && html`<div id="device-name" title="Device name — set in Settings">${state.deviceName}</div>`}
       <div id="version" style=${state.deviceName ? 'margin-top:6px' : ''}>
         ${state.firmwareVersion && html`F/W: ${state.firmwareVersion}<br/>`}Web: ${state.webVersion || '—'}
@@ -841,7 +867,7 @@ const Navbar = () => {
       })()}
       ${AUTH.enabled && html`
         <div id="whoami" class="whoami" title=${AUTH.user + ' — ' + (ROLE_LABEL[AUTH.role] || AUTH.role) + ' (open your account)'}
-          onclick=${() => { history.replaceState(null, '', '#settings/users'); dispatch({ type: 'SET_ACTIVE_TAB', payload: 'settings' }); }}>
+          onclick=${() => { closeNavDrawer(); history.replaceState(null, '', '#settings/users'); dispatch({ type: 'SET_ACTIVE_TAB', payload: 'settings' }); }}>
           <span class="user-avatar">${(AUTH.user || '?').slice(0, 2).toUpperCase()}</span>
           <span class="whoami-text">
             <span class="whoami-name">${AUTH.user}</span>
@@ -852,6 +878,42 @@ const Navbar = () => {
       `}
     </aside>
   `;
+};
+
+// Glass top bar: where you are (breadcrumb) and the page title
+const TopBar = () => {
+  const { state } = useContext(Store);
+  const t = tabs.find(x => x.id === state.activeTab) || tabs[0];
+  const title = t.id === 'dashboard' ? (state.deviceName || 'Dashboard') : t.label;
+  return html`
+    <header id="topbar">
+      <div style="min-width:0">
+        <div class="crumb">${tabGroupOf(t.id)}<span class="crumbsep">/</span><span class="crumb-cur">${t.label}</span></div>
+        <h1 class="page-title">${title}</h1>
+      </div>
+    </header>`;
+};
+
+// Phone navigation: four tabs and More (the full sidebar as a drawer)
+const BottomBar = () => {
+  const { state, dispatch } = useContext(Store);
+  const inBar = BOTTOM_TABS.some(([id]) => id === state.activeTab);
+  return html`
+    <nav id="bottombar" aria-label="Sections">
+      ${BOTTOM_TABS.map(([id, label]) => {
+        const t = tabs.find(x => x.id === id);
+        return html`<button type="button" key=${id} class="bb-item ${state.activeTab === id ? 'active' : ''}"
+          aria-current=${state.activeTab === id ? 'page' : undefined}
+          onclick=${() => { closeNavDrawer(); dispatch({ type: 'SET_ACTIVE_TAB', payload: id }); }}>
+          <span class="tab-icon" dangerouslySetInnerHTML=${{ __html: t.icon }}></span><span>${label}</span>
+        </button>`;
+      })}
+      <button type="button" id="bottombar-more" class="bb-item ${inBar ? '' : 'active'}" aria-label="More sections"
+        onclick=${() => document.body.classList.toggle('nav-open')}>
+        <span class="tab-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></span><span>More</span>
+      </button>
+    </nav>
+    <div id="nav-scrim" onclick=${closeNavDrawer}></div>`;
 };
 
 // ==================== Dashboard ====================
@@ -1202,6 +1264,16 @@ const Parameters = () => {
       </div>
       <div class="main-left">
         <h2>Parameters</h2>
+        ${state.unsavedParams > 0 && can('operator') && html`
+          <div id="savebar" class="savebar" role="status">
+            <span class="savebar-dot" aria-hidden="true"></span>
+            <b>${state.unsavedParams} change${state.unsavedParams === 1 ? ' is' : 's are'} live but not saved to flash</b>
+            <span class="savebar-sub">Lost when the inverter restarts.</span>
+            <span class="savebar-actions">
+              <button onclick=${() => api.getText('load').then(() => api.getJSON('json')).then(json => dispatch({ type: 'SET_PARAMS', payload: json })).catch(() => {})}><${Icon} n="undo" />Restore from flash</button>
+              <button class="primary" onclick=${() => api.getText('save').then(r => showToast((r || '').trim() || 'Parameters saved', 'ok')).catch(e => showToast('Save failed: ' + e.message, 'error'))}><${Icon} n="save" />Save to flash</button>
+            </span>
+          </div>`}
         <table id="params" class="fullheight" style="width:auto;table-layout:auto">
           <thead><tr><th></th><th>I</th><th>Name</th><th>Value</th><th>Unit</th><th>Min</th><th>Max</th><th>Default</th></tr></thead>
           <tbody id="paramBody">
@@ -5129,8 +5201,9 @@ const Gauges = ({ dash = false }) => {
       let cell = availW / GRID_COLS;
       const rows = itemsRef.current.reduce((m, g) => Math.max(m, (g.y || 0) + (g.h || 1)), 0);
       // A 'stack' page (the Dashboard) reads like a page and scrolls; only
-      // gauge pages shrink to fit the screen height
-      if (rows > 0 && !stackRef.current) {
+      // gauge pages shrink to fit the screen height, and not on phones,
+      // where the top and bottom bars leave too little height for it
+      if (rows > 0 && !stackRef.current && window.innerWidth >= 600) {
         const availH = window.innerHeight - el.getBoundingClientRect().top - 8;
         const capCell = (availH - MARGIN * (rows + 1)) / rows;
         if (capCell > 30 && capCell < cell) cell = capCell; // floor ~30px/cell
@@ -6230,6 +6303,15 @@ const App = () => {
     });
   }, []);
 
+  // Parameter sets that are live but not yet saved to flash
+  useEffect(() => {
+    const onSet = () => dispatch({ type: 'PARAMS_UNSAVED', payload: 1 });
+    const onSaved = () => dispatch({ type: 'PARAMS_UNSAVED', payload: 0 });
+    window.addEventListener('oi-param-set', onSet);
+    window.addEventListener('oi-params-saved', onSaved);
+    return () => { window.removeEventListener('oi-param-set', onSet); window.removeEventListener('oi-params-saved', onSaved); };
+  }, []);
+
   // Unified data fetching — respects refreshRate setting
   useEffect(() => {
     let running = true;
@@ -6314,8 +6396,10 @@ const App = () => {
     <${Store.Provider} value=${store}>
       <div id="content">
         <${Navbar} />
+        <${BottomBar} />
         <div id="content-wrapper">
           <div id="content-wrapper-inner" data-panel="open">
+            <${TopBar} />
             ${AUTH.enabled && AUTH.role === 'viewer' && html`
               <div id="readonly-bar" class="readonly-bar" role="note">
                 <b>Read-only account</b><span class="ro-long">— you can view everything; changes need an operator or admin.</span>

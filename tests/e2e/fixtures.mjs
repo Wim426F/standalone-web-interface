@@ -89,7 +89,8 @@ export { expect };
 /** Navigate to the app and wait for the first parameter fetch to land. */
 export async function openApp(page, mock, { version = 'v0.1-mock' } = {}) {
   await page.goto(mock.url);
-  await expect(page.locator('.tablink', { hasText: 'Dashboard' })).toBeVisible();
+  // The top bar shows on every screen size (on phones the nav links sit in a drawer)
+  await expect(page.locator('#topbar')).toBeVisible();
   // App is live once the json poll has populated the store (navbar shows F/W version)
   await expect(page.locator('#version')).toContainText('Web: ' + version);
 }
@@ -101,6 +102,12 @@ export async function signInBrowser(page, mock, user, password) {
   await page.context().addCookies([{ name: 'oisess', value: cookie.slice('oisess='.length), url: mock.url, httpOnly: true, sameSite: 'Strict' }]);
 }
 
+// Sidebar on wide screens; on phones the sidebar is a drawer behind the
+// bottom bar's More button, so open it first when the link isn't showing
 export async function gotoTab(page, label) {
+  const more = page.locator('#bottombar-more');
+  if ((await more.isVisible()) && !(await page.evaluate(() => document.body.classList.contains('nav-open')))) {
+    await more.click();
+  }
   await page.locator('.tablink', { hasText: label }).click();
 }

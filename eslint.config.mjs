@@ -17,7 +17,7 @@ const browserGlobals = {
   alert: 'readonly', confirm: 'readonly', prompt: 'readonly',
   console: 'readonly', performance: 'readonly',
   FileReader: 'readonly', TextDecoder: 'readonly', TextEncoder: 'readonly',
-  ResizeObserver: 'readonly', getComputedStyle: 'readonly',
+  ResizeObserver: 'readonly', getComputedStyle: 'readonly', Event: 'readonly',
 };
 
 export default [

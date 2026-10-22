@@ -63,7 +63,7 @@ async function open(context, hash, { can = false } = {}) {
   await page.addInitScript(() => { try { localStorage.setItem('spotSparks', '1'); } catch (e) {} });
   await page.goto(server.url + (can ? '?can=1' : '') + '#' + hash);
   await page.addStyleTag({ content: SHOT_CSS });
-  await page.locator('.tablink').first().waitFor();
+  await page.locator('#topbar').waitFor(); // on phones the nav links sit in a closed drawer
   // Real network (the bundled gauge layout) and layout observers settle
   // while the clock stands still, so they land at the same simulated moment
   await page.waitForLoadState('networkidle');

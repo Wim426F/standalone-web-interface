@@ -187,8 +187,10 @@ test.describe('Phone (375×812)', () => {
     await page.locator('#login-user').fill(ADMIN[0]);
     await page.locator('#login-password').fill(ADMIN[1]);
     await page.locator('#login-submit').tap();
-    await expect(page.locator('#whoami .user-avatar')).toBeVisible();
+    await expect(page.locator('#topbar')).toBeVisible();
     expect(await overflow(page)).toBeLessThanOrEqual(1);
+    await page.locator('#bottombar-more').tap(); // the account sits in the More drawer on a phone
+    await expect(page.locator('#whoami .user-avatar')).toBeVisible();
   });
 
   test('account and user management fit the phone', async ({ page, mock }) => {
@@ -196,7 +198,8 @@ test.describe('Phone (375×812)', () => {
     await mock.addUser(...VIEW, 'viewer');
     await signInBrowser(page, mock, ...ADMIN);
     await openApp(page, mock);
-    await page.locator('#whoami').tap(); // the avatar in the slim rail opens the account
+    await page.locator('#bottombar-more').tap(); // on a phone the account sits in the More drawer
+    await page.locator('#whoami').tap(); // the avatar opens the account
     await expect(page.locator('#my-account')).toBeVisible();
     await expect(page.locator('#user-list .user-row')).toHaveCount(2);
     expect(await overflow(page)).toBeLessThanOrEqual(1);

@@ -70,7 +70,7 @@ test.describe('Gauge value transport', () => {
     await openApp(page, mock);
     await gotoTab(page, 'Gauges');
     await expect.poll(async () => await mock.commands()).toContain('stream udc');
-    await gotoTab(page, 'Dashboard');
+    await gotoTab(page, 'Settings'); // not the Dashboard: its status tile streams too
     // The listener holds one client; once the browser closes the
     // EventSource the mock drops its handle
     await expect.poll(async () => (await fetch(mock.url + '/__test/state').then(r => r.json())).sseOpen).toBe(false);
