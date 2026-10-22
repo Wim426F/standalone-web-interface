@@ -350,8 +350,11 @@ input:checked + .slider::before { transform: translateX(14px); }
 .dash-box {
   flex: 1; min-width: 0; padding: 1.25rem 1.5rem;
   position: relative;
+  /* No backdrop blur: an in-flow card only has the page behind it, and
+     Chrome's blur samples past the card's edge, so a card below another
+     showed a flickering light band along its top on every repaint.
+     Floating chrome (navbar, top bar, modals, toasts) keeps its blur */
   background: var(--card-bg);
-  backdrop-filter: blur(26px) saturate(125%); -webkit-backdrop-filter: blur(26px) saturate(125%);
   border: 1px solid var(--border);
   border-radius: var(--radius); box-shadow: var(--shadow);
   min-height: 160px; display: flex; flex-direction: column;
