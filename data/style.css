@@ -1102,9 +1102,8 @@ button.danger { color: var(--red); background: color-mix(in srgb, var(--red) 7%,
   .wt-actions .widget-actions button { font-size: 0; gap: 0; padding: 6px 12px; }
   .wt-actions .widget-actions .btn-ic svg { width: 16px; height: 16px; }
 }
-/* Dashboard/gauge header: Record is a red dot in a ring; recording turns the
-   button red and the ring pulses */
-#rec-btn .btn-ic svg [fill="currentColor"] { fill: var(--red); }
+/* Dashboard/gauge header: Record is a dot in a ring, in the text colour
+   while idle; recording turns the button red and the ring pulses */
 #rec-btn.recording { color: var(--red); border-color: var(--red); }
 #rec-btn.recording .btn-ic svg { animation: pulse-dot 1.6s ease infinite; }
 /* stack layout: on phones a 'stack' page lists its tiles in reading order,
