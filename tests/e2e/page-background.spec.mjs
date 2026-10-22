@@ -113,11 +113,38 @@ test.describe('Page backgrounds', () => {
     await gotoTab(page, 'Gauges');
     await page.locator('.page-pill', { hasText: 'Vehicle' }).click();
     await expect.poll(() => bgLoaded(page)).toBe(true);
-    await expect(page.locator('#gauges .gauge-tile.tile-clear')).toHaveCount(7);
-    // Its lamps are Lamp only: just the light, no name row or ON/OFF caption
-    await expect(page.locator('#gauges .ind-lamp')).toHaveCount(5);
-    await expect(page.locator('#gauges .gauge-tile:has(.ind-lamp) .gauge-tile-name')).toHaveCount(0);
-    await expect(page.locator('#gauges .ind-wrap .g-unit')).toHaveCount(0);
+    // The car is a 4x2-cell block, with gauges beside and below it
+    const sample = JSON.parse(fs.readFileSync(path.join(DATA, 'gauges-sample.json'), 'utf8')).pages.find(p => p.name === 'Vehicle');
+    expect(sample.bg).toMatchObject({ cols: 4, rows: 2 });
+    await expect(page.locator('#gauges .gauge-tile')).toHaveCount(sample.items.length);
+    // Its four car lamps are Lamp only: just the light, no name row or ON/OFF
+    // caption (Plug and FWD beside the car are ordinary indicators)
+    const lampOnly = sample.items.filter(g => g.lampOnly).length;
+    expect(lampOnly).toBe(4);
+    const lamps = page.locator('#gauges .gauge-tile:has(.ind-lamp)');
+    await expect(lamps).toHaveCount(sample.items.filter(g => g.type === 'indicator').length);
+    await expect(lamps.filter({ has: page.locator('.gauge-tile-name') })).toHaveCount(2);
+  });
+
+  test('a background can be a block of cells: Size and At place it on the grid', async ({ page, mock }) => {
+    await seedImage(mock, 'img-car.png');
+    await mock.putFile('gauges.json', LAYOUT({ file: 'img-car.png', x: 2, y: 1, cols: 4, rows: 2 }));
+    await openApp(page, mock);
+    await gotoTab(page, 'Gauges');
+    await expect.poll(() => bgLoaded(page)).toBe(true);
+    const box = () => page.evaluate(() => {
+      const g = document.querySelector('#gauges .grid-stack').getBoundingClientRect();
+      const b = document.querySelector('#gauges .page-bg').getBoundingClientRect();
+      const cell = g.width / 10;
+      return [(b.left - g.left) / cell, (b.top - g.top) / cell, b.width / cell, b.height / cell].map(v => Math.round(v * 100) / 100);
+    });
+    // Rows use the grid's whole-pixel cell height, as the tiles do: allow for rounding
+    const off = async () => { const b = await box(); return Math.max(...[2, 1, 4, 2].map((v, i) => Math.abs(b[i] - v))); };
+    await expect.poll(off).toBeLessThan(0.03);
+    // The page is kept tall enough for the block (row 1 + 2 rows)
+    expect(await page.locator('#gauges .grid-stack').evaluate(el => el.getBoundingClientRect().height / (el.getBoundingClientRect().width / 10))).toBeGreaterThanOrEqual(2.99);
+    await page.setViewportSize({ width: 820, height: 900 });
+    await expect.poll(off).toBeLessThan(0.03);
   });
 
   test('Lamp only hides an indicator\'s name and caption, and is saved', async ({ page, mock }) => {

@@ -144,6 +144,6 @@ test('the sample layout\'s example image renders; image uploads are refused', as
 test('the sample Vehicle page shows its background picture', async ({ page }) => {
   const escaped = await openDemo(page, '#gauges');
   await page.locator('.page-pill', { hasText: 'Vehicle' }).click();
-  await expect.poll(() => page.locator('#gauges .page-bg img').evaluate(el => el.complete && el.naturalWidth)).toBe(1000);
+  await expect.poll(() => page.locator('#gauges .page-bg img').evaluate(el => el.complete && el.naturalWidth)).toBe(1200);
   expect(escaped).toEqual([]);
 });

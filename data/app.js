@@ -4472,7 +4472,7 @@ const IndicatorLamp = ({ value, min, max, color, enums, invert, px, bare }) => {
   // keeping clear air between it and the title above / state caption below.
   // A bare lamp (Lamp only) has neither: it's a glow that fades out by its
   // edge, so its box is larger for a bright core about the same size
-  const d = Math.round(px * (bare ? 0.9 : 0.42));
+  const d = Math.round(px * (bare ? 0.62 : 0.42));
   const label = v == null ? '—' : (enums ? enumLabel(enums, v) : (rawOn ? 'ON' : 'OFF'));
   return html`
     <div class="ind-wrap" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:${Math.round(px * 0.09)}px">
@@ -5064,28 +5064,41 @@ const ImageSettings = ({ cfg, update }) => html`
 
 // ---- Page backgrounds: one picture behind a gauge page's tiles (a car
 // with borderless lamp tiles over its real lamps). It is pinned to the
-// grid's own coordinates: the full grid width and `rows` cells tall, in the
+// grid's own coordinates: a block of cells (`cols` wide from column `x`,
+// `rows` tall from row `y`; the full width from the top when unset) in the
 // cell height the grid itself uses (--gs-cell, set with it in
 // applyCellSize), so a tile over a spot in the picture stays over that spot
-// at every width. Stored on the page: bg { file, v?, fit?, pos?, opacity?, rows }
+// at every width. A block smaller than the page keeps a small picture from
+// being stretched past its resolution and leaves room for gauges beside it.
+// Stored on the page: bg { file, v?, fit?, pos?, opacity?, x?, y?, cols?, rows }
 const BG_MAX_ROWS = 20;
 function pageBg(bg) {
   if (!bg || typeof bg !== 'object' || !bg.file) return undefined;
   const op = Math.round(Number(bg.opacity));
+  const int = (v, lo, hi, dflt) => { const n = Math.round(Number(v)); return isNaN(n) ? dflt : Math.max(lo, Math.min(hi, n)); };
+  const x = int(bg.x, 0, GRID_COLS - 1, 0);
+  const cols = int(bg.cols, 1, GRID_COLS - x, GRID_COLS - x);
+  const y = int(bg.y, 0, BG_MAX_ROWS - 1, 0);
   return {
     file: String(bg.file), v: bg.v || undefined,
     fit: bg.fit === 'cover' ? 'cover' : undefined,
     pos: bg.pos === 'center' ? 'center' : undefined, // top-left otherwise
     opacity: op >= 10 && op < 100 ? op : undefined,   // percent; full when unset
+    x: x || undefined, y: y || undefined,
+    cols: cols < GRID_COLS - x ? cols : undefined,    // to the right edge when unset
     rows: Math.max(1, Math.min(BG_MAX_ROWS, Math.round(Number(bg.rows)) || 6)),
   };
 }
+// Rows the page must span to show its whole background
+const bgBottom = (bg) => bg ? (bg.y || 0) + bg.rows : 0;
 // A missing file fails quietly: no picture, and a note only while editing
 const PageBackground = ({ bg, editing }) => {
   const [brokenSrc, setBrokenSrc] = useState(null);
   const src = bg.file + (bg.v ? '?v=' + bg.v : '');
   if (brokenSrc === src) return editing ? html`<p class="page-bg-missing">Background image not found: ${bg.file}</p>` : null;
-  return html`<div class="page-bg" aria-hidden="true" style=${'height:calc(var(--gs-cell, 60px) * ' + bg.rows + ')'}>
+  const x = bg.x || 0, cols = bg.cols || (GRID_COLS - x);
+  return html`<div class="page-bg" aria-hidden="true" style=${'left:' + (x / GRID_COLS * 100) + '%;width:' + (cols / GRID_COLS * 100) + '%;'
+    + 'top:calc(var(--gs-cell, 60px) * ' + (bg.y || 0) + ');height:calc(var(--gs-cell, 60px) * ' + bg.rows + ')'}>
     <img src=${src} alt="" draggable=${false} onerror=${() => setBrokenSrc(src)}
       style=${'object-fit:' + (bg.fit || 'contain') + ';object-position:' + (bg.pos === 'center' ? 'center' : 'left top')
         + (bg.opacity ? ';opacity:' + bg.opacity / 100 : '')} />
@@ -5113,16 +5126,27 @@ const BackgroundSettings = ({ page, update }) => {
             <option value="center">Centred</option>
           </select>
         </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <label style="width:4.5em">Size</label>
+          <input id="bg-cols" type="number" min="1" max=${GRID_COLS - (bg.x || 0)} value=${bg.cols || (GRID_COLS - (bg.x || 0))} title="Columns"
+            oninput=${e => { const n = parseInt(e.target.value); if (n > 0) update({ ...bg, cols: n }); }} style="width:4.5em;padding:4px 6px" />
+          <span style="color:var(--text3)">×</span>
+          <input id="bg-rows" type="number" min="1" max=${BG_MAX_ROWS} value=${bg.rows} title="Rows"
+            oninput=${e => { const n = parseInt(e.target.value); if (n > 0) update({ ...bg, rows: n }); }} style="width:4.5em;padding:4px 6px" />
+          <label style="margin-left:6px">At</label>
+          <input id="bg-x" type="number" min="0" max=${GRID_COLS - 1} value=${bg.x || 0} title="Column"
+            oninput=${e => { const n = parseInt(e.target.value); if (n >= 0) update({ ...bg, x: n }); }} style="width:4.5em;padding:4px 6px" />
+          <span style="color:var(--text3)">,</span>
+          <input id="bg-y" type="number" min="0" max=${BG_MAX_ROWS - 1} value=${bg.y || 0} title="Row"
+            oninput=${e => { const n = parseInt(e.target.value); if (n >= 0) update({ ...bg, y: n }); }} style="width:4.5em;padding:4px 6px" />
+        </div>
         <div style="display:flex;gap:8px;align-items:center">
-          <label style="width:4.5em">Rows</label>
-          <input id="bg-rows" type="number" min="1" max=${BG_MAX_ROWS} value=${bg.rows}
-            oninput=${e => { const n = parseInt(e.target.value); if (n > 0) update({ ...bg, rows: n }); }} style="width:5em;padding:4px 6px" />
-          <label>Opacity</label>
+          <label style="width:4.5em">Opacity</label>
           <input id="bg-opacity" type="range" min="10" max="100" step="5" value=${bg.opacity || 100}
             oninput=${e => update({ ...bg, opacity: parseInt(e.target.value) })} style="flex:1;min-width:5em" />
         </div>
         <button onclick=${() => update(null)} style="font-size:.72rem;padding:3px 10px;width:auto;align-self:flex-start;color:var(--red)"><${Icon} n="x" size=${11} />Remove background</button>`}
-      <p class="edit-help" style="font-size:.72rem;color:var(--text3);margin:0">A picture behind this page, ${GRID_COLS} cells wide and Rows cells tall. It scales with the tiles, so a tile placed over a spot stays on it; tiles set to Clear sit on the picture with no card.</p>
+      <p class="edit-help" style="font-size:.72rem;color:var(--text3);margin:0">A picture behind this page: Size is columns × rows (the page is ${GRID_COLS} columns wide), At is the top-left cell (column, row), counting from 0. Keep it to a block that suits the picture's resolution, with gauges beside it. It scales with the tiles, so a tile placed over a spot stays on it; tiles set to Clear sit on the picture with no card.</p>
     </div>`;
 };
 
@@ -5371,7 +5395,7 @@ const Gauges = ({ dash = false }) => {
   stackRef.current = page.layout === 'stack';
   const itemsRef = useRef(items);
   itemsRef.current = items;
-  const bgRows = page.bg ? page.bg.rows : 0;
+  const bgRows = bgBottom(page.bg);
   const bgRowsRef = useRef(bgRows);
   bgRowsRef.current = bgRows;
   const pagesRef = useRef(pages);
