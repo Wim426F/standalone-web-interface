@@ -906,7 +906,16 @@ td { font-variant-numeric: tabular-nums; }
 /* Resize grip: a small corner affordance. gridstack's default 20px handle
    covers the centre of a 1x1 tile on a phone and intercepts the
    tap-to-configure gesture (!important: gridstack.min.css loads after us) */
-.grid-stack-item > .ui-resizable-se { opacity: .55; width: 18px !important; height: 18px !important; }
+.grid-stack-item > .ui-resizable-se { width: 22px !important; height: 22px !important; background-image: none !important; transform: none !important; }
+/* drawn in the accent colour, set in from the corner so it clears the
+   rounded dashed outline (14px radius) instead of sitting on it */
+.grid-stack-item > .ui-resizable-se::after {
+  content: ''; position: absolute; right: 7px; bottom: 7px; width: 11px; height: 11px;
+  background: var(--accent);
+  -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 11 11" fill="none" stroke="black" stroke-width="1.8" stroke-linecap="round"><path d="M10 1 1 10M10 5.5 5.5 10"/></svg>') center / contain no-repeat;
+          mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 11 11" fill="none" stroke="black" stroke-width="1.8" stroke-linecap="round"><path d="M10 1 1 10M10 5.5 5.5 10"/></svg>') center / contain no-repeat;
+}
+.grid-stack-item > .ui-resizable-se:hover::after { background: var(--text); }
 /* 1x1-on-phone tiles: the grip would cover the whole tile — settings modal
    has a Size control instead */
 .grid-stack-item.tile-tiny > .ui-resizable-se { display: none; }
@@ -1068,6 +1077,36 @@ button.danger { color: var(--red); background: color-mix(in srgb, var(--red) 7%,
 .widget-note { font-size: .78rem; color: var(--text3); margin: 0; }
 .widget-metric .metric-value { font-size: clamp(1.3rem, 2.2vw, 1.9rem); }
 .widget-metric .spark { color: var(--accent); }
+/* The status tile fits its grid cell instead of scrolling: grid rows scale
+   with the page width, so the card sizes its type to the tile (cq units)
+   and drops the extras (sub line, sparklines) when it gets short */
+.gauge-tile.widget-tile.hero-card { container-type: size; overflow: hidden; padding: 12px 14px; }
+.wt-status { gap: clamp(.25rem, 3cqh, .6rem); }
+.wt-status .hero-top { gap: 8px; }
+.wt-status .hero-state { font-size: clamp(1.05rem, min(11cqh, 7cqw), 2.1rem); }
+/* metrics wrap into a grid; StatusTile hides whole rows that don't fit */
+.wt-status .hero-metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(7.2rem, 1fr)); align-content: start;
+  gap: clamp(.3rem, 2.5cqh, .8rem) clamp(.8rem, 3cqw, 1.6rem); margin-top: 0; flex: 1; min-height: 0; overflow: hidden; }
+.wt-status .metric { min-width: 0; }
+.wt-status .metric.clipped { visibility: hidden; }
+.wt-status .metric-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wt-status .metric-value { font-size: clamp(1rem, 8cqh, 1.7rem); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wt-status .spark { width: 100%; max-width: 90px; height: auto; }
+@container (max-height: 250px) { .wt-status .hero-sub { display: none; } }
+@container (max-height: 190px) { .wt-status .spark { display: none; } }
+/* Actions: icon-only buttons once the labels would wrap to a second row */
+.gauge-tile.widget-tile:has(.wt-actions) { container-type: inline-size; padding: 6px 12px; }
+.wt-actions { justify-content: center; }
+@container (max-width: 760px) {
+  .wt-actions .widget-actions { flex-wrap: nowrap; }
+  .wt-actions .widget-actions button { font-size: 0; gap: 0; padding: 6px 12px; }
+  .wt-actions .widget-actions .btn-ic svg { width: 16px; height: 16px; }
+}
+/* Dashboard/gauge header: Record is a red dot in a ring; recording turns the
+   button red and the ring pulses */
+#rec-btn .btn-ic svg [fill="currentColor"] { fill: var(--red); }
+#rec-btn.recording { color: var(--red); border-color: var(--red); }
+#rec-btn.recording .btn-ic svg { animation: pulse-dot 1.6s ease infinite; }
 /* stack layout: on phones a 'stack' page lists its tiles in reading order,
    two per row, wide tiles across both (gridstack's absolute positions off) */
 .grid-stack.stacked { display: grid !important; grid-template-columns: 1fr 1fr; gap: 10px; height: auto !important; max-width: none !important; }

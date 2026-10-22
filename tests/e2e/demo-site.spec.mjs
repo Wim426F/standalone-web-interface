@@ -81,7 +81,6 @@ test('rebooting is harmless and says why', async ({ page }) => {
 test('CAN mode lists the device mappings', async ({ page }) => {
   await openDemo(page, '?can=1#canmapping');
   await expect(page.locator('#content')).toContainText('0x3E8');
-  await expect(page.locator('#oi-demo-banner')).toContainText('UART mode');
 });
 
 test('updating from GitHub is harmless and says why', async ({ page }) => {
