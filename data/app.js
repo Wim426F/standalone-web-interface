@@ -5710,7 +5710,9 @@ const Gauges = ({ dash = false }) => {
         `}
       </div>
       `}
-      <div class="main-left ${editing ? '' : 'gauge-swipe'}" onpointerdown=${onSwipeStart}
+      ${/* Swipe only where there's another page to swipe to; elsewhere (the
+          Dashboard, a single gauge page) touch behaves normally */ ''}
+      <div class="main-left ${editing || shownPages.length < 2 ? '' : 'gauge-swipe'}" onpointerdown=${onSwipeStart}
         onpointermove=${onSwipeMove} onpointerup=${onSwipeEnd}
         onpointercancel=${() => { swipeRef.current = null; clearSwipeHint(); }}>
         ${!editing && html`<div class="swipe-hint" ref=${swipeHintRef}></div>`}
