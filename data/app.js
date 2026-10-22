@@ -684,6 +684,9 @@ const ICONS = {
   compare: '<polyline points="8 7 3 12 8 17"/><polyline points="16 7 21 12 16 17"/><line x1="3" y1="12" x2="21" y2="12"/>',
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
+  record: '<circle cx="12" cy="12" r="9.5"/><circle cx="12" cy="12" r="4.5" fill="currentColor" stroke="none"/>',
+  recstop: '<circle cx="12" cy="12" r="9.5"/><rect x="8" y="8" width="8" height="8" rx="1.5" fill="currentColor" stroke="none"/>',
+  fullscreen: '<path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/>',
 };
 const Icon = ({ n, size = 13 }) => html`<span class="btn-ic" dangerouslySetInnerHTML=${{
   __html: '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (ICONS[n] || '') + '</svg>'
@@ -4686,6 +4689,20 @@ const StatusTile = ({ g, nameVals }) => {
   const show = (n) => { const v = live(n); return v == null ? null : (sv[n] && sv[n].enums ? enumText(v, sv[n].enums) : fmtNum(v)); };
   const figs = statusFigs(g);
   const hist = useRef({});
+  // A short tile shows the metric rows that fit and hides the rest whole,
+  // rather than scrolling or cutting a row in half
+  const metricsRef = useRef(null);
+  useLayoutEffect(() => {
+    const box = metricsRef.current;
+    if (!box || typeof ResizeObserver === 'undefined') return;
+    const fit = () => {
+      const bottom = box.getBoundingClientRect().bottom + 1;
+      for (const m of box.children) m.classList.toggle('clipped', m.getBoundingClientRect().bottom > bottom);
+    };
+    const ro = new ResizeObserver(fit);
+    ro.observe(box);
+    return () => ro.disconnect();
+  }, [!!metricsRef.current, figs.length]);
   figs.forEach(n => {
     const v = live(n);
     if (typeof v !== 'number' || isNaN(v)) return;
@@ -4710,7 +4727,7 @@ const StatusTile = ({ g, nameVals }) => {
     </div>
     <div class="hero-state">${friendly}</div>
     <p class="hero-sub">Status: ${show('status') || state.status}</p>
-    <div class="hero-metrics">
+    <div class="hero-metrics" ref=${metricsRef}>
       ${figs.map((name, idx) => {
         const s1 = sv[name];
         const unit = (s1 && s1.unit && s1.unit.indexOf('=') === -1) ? s1.unit : '';
@@ -4724,7 +4741,7 @@ const StatusTile = ({ g, nameVals }) => {
       ${state.firmwareVersion && html`
         <div class="metric">
           <span class="metric-label">Firmware</span>
-          <span class="metric-value" style="font-size:1.05rem;line-height:1.4;margin-top:6px">${state.firmwareVersion}</span>
+          <span class="metric-value" style="font-size:1.05rem">${state.firmwareVersion}</span>
         </div>`}
     </div>`;
 };
@@ -4813,7 +4830,7 @@ const ActionsTile = ({ g }) => {
   return html`
     <div class="widget-actions">
       ${DASH_ACTIONS.filter(a => want.includes(a.id)).map(a => html`
-        <${Gate} need=${a.need} key=${a.id}><button class=${a.id === 'reboot' ? 'danger' : ''} onclick=${() => run(a.id)}><${Icon} n=${a.icon} />${a.label}</button></${Gate}>`)}
+        <${Gate} need=${a.need} key=${a.id}><button class=${a.id === 'reboot' ? 'danger' : ''} title=${a.label} onclick=${() => run(a.id)}><${Icon} n=${a.icon} />${a.label}</button></${Gate}>`)}
     </div>
     ${confirmAction && html`
       <${Modal} id="reset-modal" title=${confirmAction === 'inverter' ? 'Reset inverter' : 'Reboot ESP32'} onClose=${() => setConfirmAction(null)}>
@@ -5736,10 +5753,10 @@ const Gauges = ({ dash = false }) => {
             ${!editing && html`<button id="rec-btn" onclick=${() => (recording ? stopRec() : startRec())}
               title=${recording ? 'Stop and review the recording' : 'Record the streamed values for CSV export'}
               aria-label=${recording ? 'Stop recording' : 'Record'}
-              style=${'font-size:.75rem;padding:4px 12px' + (recording ? ';color:var(--red);border-color:var(--red)' : '')}>
-              <span aria-hidden="true">${recording ? '■' : '●'}</span><span class="hd-label">${recording ? 'Stop' : 'Record'}</span></button>`}
-            ${!editing && html`<button id="fullscreen-btn" onclick=${() => setKiosk(true)} title="Full screen — gauges only, all chrome hidden" aria-label="Full screen" style="font-size:.75rem;padding:4px 12px"><span aria-hidden="true">⛶</span><span class="hd-label">Full screen</span></button>`}
-            ${!editing && can('operator') && html`<button onclick=${startEditing} title="Edit Layout" aria-label="Edit Layout" style="font-size:.75rem;padding:4px 12px"><${Icon} n="edit" /><span class="hd-label">Edit Layout</span></button>`}
+              class=${recording ? 'recording' : ''} style="font-size:.75rem;padding:4px 12px">
+              <${Icon} n=${recording ? 'recstop' : 'record'} size=${16} /><span class="hd-label">${recording ? 'Stop' : 'Record'}</span></button>`}
+            ${!editing && html`<button id="fullscreen-btn" onclick=${() => setKiosk(true)} title="Full screen — gauges only, all chrome hidden" aria-label="Full screen" style="font-size:.75rem;padding:4px 12px"><${Icon} n="fullscreen" size=${16} /><span class="hd-label">Full screen</span></button>`}
+            ${!editing && can('operator') && html`<button onclick=${startEditing} title="Edit Layout" aria-label="Edit Layout" style="font-size:.75rem;padding:4px 12px"><${Icon} n="edit" size=${16} /><span class="hd-label">Edit Layout</span></button>`}
           </div>
         </div>
         ${!dash && html`<div id="gauge-pages" class="seg" style="margin-bottom:.6rem">
