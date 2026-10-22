@@ -906,7 +906,16 @@ td { font-variant-numeric: tabular-nums; }
 /* Resize grip: a small corner affordance. gridstack's default 20px handle
    covers the centre of a 1x1 tile on a phone and intercepts the
    tap-to-configure gesture (!important: gridstack.min.css loads after us) */
-.grid-stack-item > .ui-resizable-se { opacity: .55; width: 18px !important; height: 18px !important; }
+.grid-stack-item > .ui-resizable-se { width: 22px !important; height: 22px !important; background-image: none !important; transform: none !important; }
+/* drawn in the accent colour, set in from the corner so it clears the
+   rounded dashed outline (14px radius) instead of sitting on it */
+.grid-stack-item > .ui-resizable-se::after {
+  content: ''; position: absolute; right: 7px; bottom: 7px; width: 11px; height: 11px;
+  background: var(--accent);
+  -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 11 11" fill="none" stroke="black" stroke-width="1.8" stroke-linecap="round"><path d="M10 1 1 10M10 5.5 5.5 10"/></svg>') center / contain no-repeat;
+          mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 11 11" fill="none" stroke="black" stroke-width="1.8" stroke-linecap="round"><path d="M10 1 1 10M10 5.5 5.5 10"/></svg>') center / contain no-repeat;
+}
+.grid-stack-item > .ui-resizable-se:hover::after { background: var(--text); }
 /* 1x1-on-phone tiles: the grip would cover the whole tile — settings modal
    has a Size control instead */
 .grid-stack-item.tile-tiny > .ui-resizable-se { display: none; }
