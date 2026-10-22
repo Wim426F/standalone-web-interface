@@ -741,6 +741,9 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
         for (const name of ['settings.json', 'uiprefs.json']) if (files.has(name)) kept.set(name, files.get(name));
         files = kept;
         otaFlashes++;
+        // The device then reboots: its session table is in RAM, so everyone
+        // is signed out (accounts are in NVS and stay)
+        auth.revokeAll();
         return json({ ok: true });
       }
       if (p === '/reboot') return text('Rebooting...');
