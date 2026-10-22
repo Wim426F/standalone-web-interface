@@ -1082,6 +1082,8 @@ button.danger { color: var(--red); background: color-mix(in srgb, var(--red) 7%,
 .navlbl { font: 700 .62rem/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; color: var(--text3); padding: 14px 23px 7px; }
 button.tablink { background: transparent; border: 1px solid transparent; width: calc(100% - 20px); justify-content: flex-start; text-align: left; font-family: var(--font); line-height: 1.4; }
 button.tablink:hover { border-color: transparent; }
+/* slim rail (tablets, phones in landscape): the icon alone, centred */
+@media (max-width: 900px) { button.tablink { justify-content: center; } }
 #topbar { position: relative; flex: 0 0 auto; z-index: 30; display: flex; align-items: center; justify-content: space-between; gap: 14px;
   min-height: 64px; padding: 10px 24px; margin: 0 0 14px; border-bottom: 1px solid var(--border);
   background: var(--glass); backdrop-filter: blur(26px) saturate(125%); -webkit-backdrop-filter: blur(26px) saturate(125%); }
