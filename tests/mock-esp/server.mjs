@@ -53,6 +53,7 @@ const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '
 const MIME = {
   '.html': 'text/html', '.htm': 'text/html', '.js': 'application/javascript', '.css': 'text/css',
   '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2',
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif',
 };
 
 // Firmware limits (esp32-web-interface.ino)

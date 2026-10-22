@@ -1678,7 +1678,10 @@ const exportUiSettings = async () => {
       if (v != null) prefs[k] = v;
     });
   } catch (e) {}
-  const bundle = { type: 'openinverter-ui-settings', version: 1, exported: new Date().toISOString(), favorites, gauges, plots, virtualvals, presets, prefs };
+  // The pictures the gauge pages show travel along as data URLs (a JSON
+  // bundle can't hold bytes); the UI's own images come with every update
+  const images = await readImages(layoutImages(gauges));
+  const bundle = { type: 'openinverter-ui-settings', version: 1, exported: new Date().toISOString(), favorites, gauges, plots, virtualvals, presets, prefs, images };
   const a = document.createElement('a');
   a.href = 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(bundle, null, 2));
   a.download = 'ui-settings.json';
@@ -1709,8 +1712,41 @@ async function stashFilesForUpdate() {
       if (r.ok) files[name] = await r.text();
     } catch (e) {}
   }));
-  try { localStorage.setItem(UPDATE_STASH_KEY, JSON.stringify({ at: Date.now(), files })); } catch (e) { return -1; }
+  // Uploaded images (img-*) ride along as data URLs when there's room, so
+  // image tiles don't come back empty; past the quota only layouts are kept
+  const images = present ? await readImages([...present].filter(isUserImage)) : {};
+  const save = (o) => { try { localStorage.setItem(UPDATE_STASH_KEY, JSON.stringify(o)); return true; } catch (e) { return false; } };
+  if (!save({ at: Date.now(), files, images }) && !save({ at: Date.now(), files })) return -1;
   return Object.keys(files).length;
+}
+// { name: dataURL } for the user images (img-*) among names, skipping any
+// that can't be read
+async function readImages(names) {
+  const out = {};
+  await Promise.all(names.filter(isUserImage).map(async name => {
+    try {
+      const r = await fetch('/' + name, { cache: 'no-store' });
+      if (r.ok) out[name] = await blobToDataUrl(await r.blob());
+    } catch (e) {}
+  }));
+  return out;
+}
+// The uploaded images a gauges.json shows, on every page
+const layoutImages = (gauges) => [...new Set(((gauges && gauges.pages) || [])
+  .flatMap(p => (p.items || []).filter(g => g.type === 'image' && isUserImage(g.file)).map(g => g.file)))];
+const blobToDataUrl = (blob) => new Promise((resolve, reject) => {
+  const fr = new FileReader();
+  fr.onload = () => resolve(fr.result);
+  fr.onerror = () => reject(fr.error);
+  fr.readAsDataURL(blob);
+});
+function dataUrlToBlob(url) {
+  const m = /^data:([^;,]*);base64,(.*)$/.exec(url);
+  if (!m) throw new Error('not a data URL');
+  const bin = window.atob(m[2]);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: m[1] });
 }
 
 // Runs once at load (after sign-in when that's on). Only fills in files the
@@ -1731,11 +1767,15 @@ async function restoreFilesAfterUpdate() {
     present = new Set((await r.json()).map(f => String(f.name).replace(/^\/+/, '')));
   } catch (e) { return 0; }
   let restored = 0;
-  for (const [name, text] of Object.entries(stash.files)) {
+  const uploads = [
+    ...Object.entries(stash.files).map(([name, text]) => [name, () => new Blob([text], { type: 'application/json' })]),
+    ...Object.entries(stash.images || {}).map(([name, url]) => [name, () => dataUrlToBlob(url)]),
+  ];
+  for (const [name, blob] of uploads) {
     if (present.has(name)) continue; // already there (newer): leave it
     try {
       const fd = new FormData();
-      fd.append('updatefile', new Blob([text], { type: 'application/json' }), name);
+      fd.append('updatefile', blob(), name);
       const up = await fetch('/edit', { method: 'POST', body: fd });
       if (!up.ok) return restored;
       restored++;
@@ -2191,7 +2231,7 @@ const Update = () => {
           <p>A daily check flags newer releases with a badge in the sidebar (toggle it off with <b>Daily update check</b>). When one is available its release list loads automatically; otherwise <b>Get releases</b> lists them from the GitHub repo above (pre-filled with the repo this build came from). The image for your board is selected by default — then <b>Download & install</b>, or use <b>Install OTA image from file</b> to flash one you built locally.</p>
           <p><b>Update channel</b>: <b>Stable</b> (default) offers tested releases only. <b>Dev</b> also offers the pre-releases (<code>vX.Y-dev.N</code>) built from every change on the dev branch — newer, less tested; a dev device still moves on to the stable release that follows them.</p>
           <p>Use <b>Upload single file</b> for individual file tweaks.</p>
-          <p><b>Your settings survive updates.</b> The device keeps its own settings (pins, CAN, name, UI preferences) and user accounts outside the filesystem. Your layouts — gauges, plots, presets, favourites — are backed up in this browser just before flashing and put back automatically after the reboot. <b>Export settings (backup)</b> is still worth doing before flashing over USB or from another browser.</p>
+          <p><b>Your settings survive updates.</b> The device keeps its own settings (pins, CAN, name, UI preferences) and user accounts outside the filesystem. Your layouts — gauges, plots, presets, favourites, and the images on your gauge pages — are backed up in this browser just before flashing and put back automatically after the reboot. <b>Export settings (backup)</b> is still worth doing before flashing over USB or from another browser.</p>
           <p style="font-size:.8rem;color:var(--text3);margin:0">The bootloader and partition table aren't touched, so a bad image stays recoverable over USB. The web interface reboots and the page reloads when done.</p>
         </div>
       </div>
@@ -3379,11 +3419,26 @@ const Settings = () => {
     try {
       const bundle = JSON.parse(await file.text());
       if (bundle.type !== 'openinverter-ui-settings') { alert('Not a UI settings export file'); return; }
+      const upBlob = async (name, blob) => {
+        const fd = new FormData();
+        fd.append('updatefile', blob, name);
+        const r = await fetch('/edit', { method: 'POST', body: fd });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+      };
       const up = async (name, data) => {
         const fd = new FormData();
         fd.append('updatefile', new Blob([JSON.stringify(data)], { type: 'application/json' }), name);
         await fetch('/edit', { method: 'POST', body: fd });
       };
+      // Images go first so the restored pages find them; one that fails
+      // (no space, bad data) is reported but doesn't stop the layouts
+      const failed = [];
+      for (const [name, url] of Object.entries(bundle.images || {})) {
+        try {
+          if (!isUserImage(name)) throw new Error('not an image-tile file');
+          await upBlob(name, dataUrlToBlob(url));
+        } catch (err) { failed.push(name); }
+      }
       if (bundle.favorites) await up('favorites.json', bundle.favorites);
       if (bundle.gauges) await up('gauges.json', bundle.gauges);
       if (bundle.plots) await up('plots.json', bundle.plots);
@@ -3399,7 +3454,7 @@ const Settings = () => {
         await up('uiprefs.json', { theme: bundle.prefs.theme || 'system', accentColor: bundle.prefs.accentColor || '', dashMetrics: dm,
           updateCheck: getUpdateCheckAuto(), updateChannel: getUpdateChannel() });
       }
-      alert('Settings imported — reloading');
+      alert('Settings imported' + (failed.length ? ', except image' + (failed.length > 1 ? 's ' : ' ') + failed.join(', ') + ' (the tiles show a placeholder)' : '') + ' — reloading');
       location.reload();
     } catch (err) { alert('Import failed: ' + err.message); }
   };
@@ -3871,7 +3926,7 @@ const Settings = () => {
 
         <div class="dash-box compact">
           <h3>Backup & Restore</h3>
-          <p style="font-size:.8rem;margin:0 0 .5rem">Back up or restore favourites, gauge pages, presets, plot layouts and UI preferences as a single file.</p>
+          <p style="font-size:.8rem;margin:0 0 .5rem">Back up or restore favourites, gauge pages (with the images they show), presets, plot layouts and UI preferences as a single file.</p>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button onclick=${exportUiSettings} style="width:auto"><${Icon} n="download" />Export settings</button>
             <${Gate} need="operator">
@@ -4242,8 +4297,8 @@ const tileStreamName = (g) => g.name || ((g.type === 'toggle' || g.type === 'sli
 // pages and the same editor as every gauge, so any tile can sit on the
 // Dashboard or on a gauge page (doc/REDESIGN.md, phase 3). The Dashboard tab
 // is simply the page gauges.json names as `dashboard`.
-const WIDGET_TYPES = new Set(['status', 'metric', 'messages', 'terminal', 'actions', 'cansend']);
-const NO_VALUE_TYPES = ['status', 'messages', 'terminal', 'actions', 'cansend'];
+const WIDGET_TYPES = new Set(['status', 'metric', 'messages', 'terminal', 'actions', 'cansend', 'image']);
+const NO_VALUE_TYPES = ['status', 'messages', 'terminal', 'actions', 'cansend', 'image'];
 const STATUS_NAMES = ['opmode', 'status', 'lasterr'];
 const statusFigs = (g) => (Array.isArray(g.figs) && g.figs.length ? g.figs : getDashMetrics());
 // Values a tile streams besides its own: the status tile follows the run
@@ -4874,14 +4929,135 @@ const CanSendTile = () => {
     ${result && html`<p class="widget-note" style="font-family:var(--mono)">${result}</p>`}`;
 };
 
+// ---- Image tiles: a picture from the device's filesystem (a logo, a
+// wiring sketch). Uploads are saved as img-<name>.<ext>: the firmware treats
+// that prefix as layout data an operator may write, where any other .png/.jpg
+// is part of the UI and admin-only (src/web_logic.h). SVG is pickable but
+// never uploaded: a same-origin SVG opened directly can run script.
+const IMG_PREFIX = 'img-';
+const IMG_MAX = 200 * 1024; // the whole SPIFFS is ~1-1.5 MB, the UI included
+const IMG_TYPES = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
+const isImageFile = (n) => /\.(png|jpe?g|webp|gif|svg)$/i.test(n);
+// The device files that are the user's own pictures (what backups and the
+// update stash carry). No file the firmware ships starts with img-, so an
+// update can never overwrite one (tests/e2e/image-tile.spec.mjs checks)
+const isUserImage = (n) => /^img-[\w-]+\.(png|jpe?g|webp|gif)$/i.test(String(n || ''));
+// Links open outside the app, and only to the web (no javascript: URLs);
+// checked where the tile renders, so a half-typed one just isn't a link yet
+const imgLink = (s) => (/^https?:\/\/\S+$/i.test(String(s || '').trim()) ? String(s).trim() : '');
+// SPIFFS names stop at 31 characters with the leading slash: keep the
+// user's name recognisable but short and URL-safe
+function imgFileName(file) {
+  const base = String(file.name || '').replace(/\.[^.]*$/, '').toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').replace(/^img-/, '').slice(0, 18);
+  return IMG_PREFIX + (base || 'image') + IMG_TYPES[file.type];
+}
+async function uploadImage(file) {
+  if (!IMG_TYPES[file.type]) throw new Error('Choose a PNG, JPEG, WebP or GIF image');
+  if (file.size > IMG_MAX) throw new Error('That image is ' + Math.round(file.size / 1024) + ' KB; the limit is ' + (IMG_MAX / 1024) + ' KB. Scale it down or save it as an optimised PNG/JPEG first.');
+  const name = imgFileName(file);
+  const fd = new FormData();
+  fd.append('updatefile', file, name);
+  const r = await fetch('/edit', { method: 'POST', body: fd });
+  // The reply's text is the reason (sign-in, permissions, the demo)
+  if (!r.ok) throw new Error((await r.text().catch(() => '')) || 'Upload failed (HTTP ' + r.status + ')');
+  // The firmware answers 200 even when SPIFFS filled up mid-write, so read
+  // the file back: a short one is dropped rather than shown half-drawn
+  let size = -1;
+  try { const b = await fetch('/' + name + '?v=' + Date.now(), { cache: 'no-store' }); if (b.ok) size = (await b.blob()).size; } catch (e) {}
+  if (size !== file.size) {
+    await api.deleteFile('/' + name).catch(() => {});
+    throw new Error('The device could not store the image (not enough free space?)');
+  }
+  return name;
+}
+
+// Relative src, so it resolves on the device and under the demo's base path
+// alike; ?v= (bumped by each upload) gets past the firmware's day-long image
+// cache when a file is replaced under the same name
+const ImageTile = ({ g, editing }) => {
+  // Remembered per src, not reset by an effect: a quick 404 can fire
+  // onerror before a mount effect runs, which would then clear it
+  const [brokenSrc, setBrokenSrc] = useState(null);
+  const src = g.file ? g.file + (g.v ? '?v=' + g.v : '') : '';
+  if (!src || brokenSrc === src) {
+    return html`<p class="widget-note img-empty">${!src ? (editing ? 'tap to choose an image' : '') : 'Image not found: ' + g.file}</p>`;
+  }
+  const img = html`<img class="img-pic" src=${src} alt=${g.label || ''} draggable=${false} onerror=${() => setBrokenSrc(src)}
+    style=${'object-fit:' + (g.fit === 'cover' ? 'cover' : 'contain')} />`;
+  const link = imgLink(g.href);
+  return html`
+    ${link ? html`<a class="img-link" href=${link} target="_blank" rel="noopener noreferrer">${img}</a>` : img}
+    ${g.label && html`<div class="img-caption">${g.label}</div>`}`;
+};
+
+// The image section of the tile settings: pick a file already on the
+// device or upload one (which is then picked)
+const ImageSettings = ({ cfg, update }) => {
+  const [names, setNames] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const refresh = () => api.getFileList()
+    .then(list => setNames(list.map(f => String(f.name).replace(/^\/+/, '')).filter(isImageFile).sort()))
+    .catch(() => setNames([]));
+  useEffect(() => { refresh(); }, []);
+  const opts = names ? [...new Set([...(cfg.file ? [cfg.file] : []), ...names])] : (cfg.file ? [cfg.file] : []);
+  const onFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ''; // the same file again is a new upload
+    if (!file) return;
+    setBusy(true); setErr('');
+    try {
+      const name = await uploadImage(file);
+      update('file', name);
+      update('v', Date.now());
+      await refresh();
+      showToast('Uploaded ' + name, 'ok');
+    } catch (ex) { setErr(ex.message || String(ex)); }
+    setBusy(false);
+  };
+  return html`
+    <p class="modal-sect">Image</p>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <label style="width:4.5em">File</label>
+      <select id="image-file" value=${cfg.file || ''} onchange=${e => update('file', e.target.value || undefined)}
+        style="width:auto;min-width:11em;max-width:100%;padding:5px 30px 5px 8px">
+        <option value="">${names ? '(none)' : 'Loading…'}</option>
+        ${opts.map(n => html`<option value=${n}>${n}</option>`)}
+      </select>
+      <${Gate} need="operator">
+        <input id="image-upload" type="file" accept=${Object.keys(IMG_TYPES).join(',')} hidden disabled=${busy} onchange=${onFile} />
+        <label class="butt" for="image-upload" style="font-size:.75rem;padding:4px 12px;margin:0" aria-disabled=${busy || undefined}>
+          <${Icon} n="upload" />${busy ? 'Uploading…' : 'Upload'}</label>
+      </${Gate}>
+    </div>
+    ${err && html`<p id="image-error" class="widget-note" style="color:var(--red)">${err}</p>`}
+    <div style="display:flex;gap:8px;align-items:center">
+      <label style="width:4.5em">Fit</label>
+      <select id="image-fit" value=${cfg.fit === 'cover' ? 'cover' : 'contain'} onchange=${e => update('fit', e.target.value === 'cover' ? 'cover' : undefined)}
+        style="width:auto;min-width:11em;padding:5px 30px 5px 8px">
+        <option value="contain">Whole image</option>
+        <option value="cover">Fill the tile (crops)</option>
+      </select>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <label style="width:4.5em">Link</label>
+      <input id="image-link" type="text" inputmode="url" value=${cfg.href || ''} placeholder="https://… (optional)"
+        oninput=${e => update('href', e.target.value.trim() || undefined)} style="flex:1;padding:5px 8px" />
+    </div>
+    <p style="font-size:.72rem;color:var(--text3);margin:0">PNG, JPEG, WebP or GIF up to ${IMG_MAX / 1024} KB, stored on the device as ${IMG_PREFIX}….
+      The Label above is shown as a caption; Clear drops the card behind the image.</p>`;
+};
+
 // While editing, a widget is inert: a tap configures it instead of firing it
-const WidgetTile = ({ g, value, unit, enums, nameVals, editing }) => html`
+const WidgetTile =({ g, value, unit, enums, nameVals, editing }) => html`
   <div class="widget-body wt-${g.type}" inert=${editing || undefined}>
     ${g.type === 'status' ? html`<${StatusTile} g=${g} nameVals=${nameVals} />`
       : g.type === 'metric' ? html`<${MetricTile} g=${g} value=${value} unit=${unit} enums=${enums} />`
       : g.type === 'messages' ? html`<${MessagesTile} editing=${editing} />`
       : g.type === 'terminal' ? html`<${TerminalTile} />`
       : g.type === 'actions' ? html`<${ActionsTile} g=${g} />`
+      : g.type === 'image' ? html`<${ImageTile} g=${g} editing=${editing} />`
       : html`<${CanSendTile} />`}
   </div>`;
 
@@ -5861,6 +6037,7 @@ const Gauges = ({ dash = false }) => {
                     <option value="terminal">Command terminal</option>
                     <option value="actions">Action buttons</option>
                     <option value="cansend">CAN frame sender</option>
+                    <option value="image">Image</option>
                   </optgroup>
                 </select>
                 <label style="margin-left:8px">Colour</label>
@@ -5870,7 +6047,7 @@ const Gauges = ({ dash = false }) => {
               </div>
               <div style="display:flex;gap:8px;align-items:center">
                 <label style="width:4.5em">Label</label>
-                <input type="text" value=${cfg.label || ''} placeholder="(shows the value name)" maxlength="24"
+                <input type="text" value=${cfg.label || ''} placeholder=${cfg.type === 'image' ? '(caption, optional)' : '(shows the value name)'} maxlength="24"
                   oninput=${e => updateGaugeConfig(cfg.id, 'label', e.target.value)} style="flex:1;padding:5px 8px" />
               </div>
               <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
@@ -6210,6 +6387,7 @@ const Gauges = ({ dash = false }) => {
                       updateGaugeConfig(cfg.id, 'btns', next);
                     }} />${a.label}</label>`;
                 })}`}
+              ${cfg.type === 'image' && html`<${ImageSettings} cfg=${cfg} update=${(f, v) => updateGaugeConfig(cfg.id, f, v)} />`}
               ${cfg.type === 'metric' && html`
                 <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
                   <span style="width:4.5em">Spark</span>

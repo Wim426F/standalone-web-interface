@@ -1102,6 +1102,18 @@ button.danger { color: var(--red); background: color-mix(in srgb, var(--red) 7%,
   .wt-actions .widget-actions button { font-size: 0; gap: 0; padding: 6px 12px; }
   .wt-actions .widget-actions .btn-ic svg { width: 16px; height: 16px; }
 }
+/* Image tiles: the picture takes the cell's size (zero flex basis, so it
+   never stretches the tile or makes it scroll, grid or phone stack alike)
+   and object-fit letterboxes or crops it into that box */
+.gauge-tile.widget-tile:has(.wt-image) { padding: 4px; overflow: hidden; }
+/* Clear: just the picture, edge to edge, without the card's shadow either */
+.gauge-tile.widget-tile.tile-clear:has(.wt-image) { padding: 0; box-shadow: none; }
+.wt-image { gap: 4px; align-items: center; justify-content: center; }
+.wt-image .img-link { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; width: 100%; }
+.wt-image .img-pic { display: block; flex: 1 1 0; min-height: 0; width: 100%; height: 0; }
+.wt-image .img-caption { flex: none; max-width: 100%; font-size: .75rem; color: var(--text3); text-align: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wt-image .img-empty { text-align: center; }
 /* Dashboard/gauge header: Record is a dot in a ring, in the text colour
    while idle; recording turns the button red and the ring pulses */
 #rec-btn.recording { color: var(--red); border-color: var(--red); }
