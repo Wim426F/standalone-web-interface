@@ -512,7 +512,7 @@ button:disabled:hover { background: var(--ctl-bg); border-color: var(--border); 
 body.kiosk #navbar { display: none; }
 body.kiosk #content-wrapper { left: 0; }
 body.kiosk #gauges-head { display: none !important; } /* beats the row's inline flex */
-body.kiosk #gauges.tabdiv { padding: .5rem .6rem; }
+body.kiosk .gauges-view.tabdiv { padding: .5rem .6rem; }
 body.kiosk #communication-error-bar { display: none !important; }
 .kiosk-exit {
   position: fixed; top: 10px; right: 10px; z-index: 500;
@@ -847,7 +847,7 @@ td { font-variant-numeric: tabular-nums; }
 #spotValuesWrap.multi-col #spotValues td.sv-unit { width: 44px; }
 
 /* ==================== Gauges grid (GridStack) ==================== */
-#gauges .grid-stack { min-height: 220px; }
+.gauges-view .grid-stack { min-height: 220px; }
 .gauge-tile {
   position: relative;
   background: var(--card-bg);
@@ -1048,3 +1048,23 @@ button.danger { color: var(--red); background: color-mix(in srgb, var(--red) 7%,
 @media (prefers-reduced-transparency: reduce) {
   .dash-box, #navbar, .gauge-tile { backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
+
+/* ===== DASHBOARD WIDGETS (panel tiles on the gauge grid) ===== */
+.gauge-tile.widget-tile { align-items: stretch; justify-content: flex-start; padding: 14px 16px; overflow: auto; }
+.widget-body { display: flex; flex-direction: column; gap: .6rem; flex: 1; min-height: 0; width: 100%; }
+.widget-body h3 { margin: 0; }
+.widget-body .hero-state { font-size: clamp(1.4rem, 2.6vw, 2.1rem); }
+.widget-body { align-items: stretch; text-align: left; }
+.widget-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-start; }
+.widget-actions button { width: auto; margin: 0; }
+.widget-terminal #commandoutput { flex: 1; min-height: 3em; overflow: auto; }
+.widget-pre { margin: 0; overflow: auto; }
+.widget-note { font-size: .78rem; color: var(--text3); margin: 0; }
+.widget-metric .metric-value { font-size: clamp(1.3rem, 2.2vw, 1.9rem); }
+.widget-metric .spark { color: var(--accent); }
+/* stack layout: on phones a 'stack' page lists its tiles in reading order,
+   two per row, wide tiles across both (gridstack's absolute positions off) */
+.grid-stack.stacked { display: grid !important; grid-template-columns: 1fr 1fr; gap: 10px; height: auto !important; max-width: none !important; }
+.grid-stack.stacked > .grid-stack-item { position: relative !important; left: auto !important; top: auto !important;
+  width: auto !important; height: auto !important; min-height: calc(var(--h, 2) * 60px); grid-column: span var(--span, 1); }
+.grid-stack.stacked > .grid-stack-item > .grid-stack-item-content { position: relative !important; inset: auto !important; height: 100%; min-height: inherit; }

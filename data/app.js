@@ -856,151 +856,6 @@ const Navbar = () => {
 
 // ==================== Dashboard ====================
 
-const Dashboard = () => {
-  const { state, dispatch } = useContext(Store);
-  const [cmd, setCmd] = useState('');
-  const [cmdOutput, setCmdOutput] = useState('');
-  const [confirmAction, setConfirmAction] = useState(null); // 'inverter' | 'esp32'
-  const [canId, setCanId] = useState('0x180');
-  const [canData, setCanData] = useState('00 00 00 00 00 00 00 00');
-
-  const send = async () => {
-    const c = cmd.trim();
-    if (!c) return;
-    setCmdOutput(o => o + '> ' + c + '\n'); // echo the outgoing command
-    setCmd('');
-    dispatch({ type: 'SET_LOGGING', payload: true }); // pause the json poll so it can't contend for the single UART
-    dispatch({ type: 'SET_CMD_BUSY', payload: true }); // show the CMD badge while the command runs
-    try {
-      // Generous timeout: a silent inverter returns empty in ~0.2s (firmware
-      // self-times-out the UART), so this only catches a hung ESP/connection —
-      // and it must comfortably clear a large/slow response like 'json' (~4s).
-      const reply = await api.getText(c, 0, 15000);
-      const text = reply.replace(/\s+$/, ''); // drop trailing whitespace/newlines
-      setCmdOutput(o => o + (text ? text : '(no response)') + '\n');
-    } catch (e) {
-      const msg = (e && e.name === 'AbortError') ? 'timed out — no response' : (e.message || 'request failed');
-      setCmdOutput(o => o + 'error: ' + msg + '\n');
-    } finally {
-      dispatch({ type: 'SET_LOGGING', payload: false });
-      dispatch({ type: 'SET_CMD_BUSY', payload: false });
-    }
-  };
-
-  return html`
-    <div id="dashboard" class="tabdiv main-content" style="display:flex">
-      <div class="main-right">
-        <h3 class="underline">Actions</h3>
-        <${Gate} need="operator">
-        <button onclick=${() => api.getText('start 2').then(r => dispatch({ type: 'SET_MESSAGES', payload: r }))}><${Icon} n="play" />Start inverter in manual mode</button>
-        <button onclick=${() => api.getText('stop').then(r => dispatch({ type: 'SET_MESSAGES', payload: r }))}><${Icon} n="stop" />Stop inverter</button>
-        </${Gate}>
-        <h3 class="underline">Reset</h3>
-        <${Gate} need="operator"><button onclick=${() => setConfirmAction('inverter')}><${Icon} n="rotate" />Reboot Inverter</button></${Gate}>
-        <${Gate} need="admin"><button onclick=${() => setConfirmAction('esp32')}><${Icon} n="power" />Reboot ESP32</button></${Gate}>
-      </div>
-      <div class="main-left">
-        <h2>Dashboard</h2>
-        <div id="top-row" class="dash-row">
-          <div id="top-left" class="dash-box hero-card" style="flex:1.4">
-            ${state.status != null ? (() => {
-              const offline = state.commError || (state.canMode && !state.canConnected);
-              const tone = offline ? 'danger' : opmodeTone(state.opmode);
-              const friendly = offline ? 'No connection to inverter'
-                : (OPMODE_FRIENDLY[state.opmode] || String(state.opmode == null ? '—' : state.opmode));
-              const hasErr = state.lasterr && String(state.lasterr) !== 'NONE' && String(state.lasterr) !== '0';
-              return html`
-                <div class="hero-top">
-                  <span class="pill ${tone}"><span class="dot"></span>${offline ? 'Offline' : state.opmode}</span>
-                  ${hasErr && html`<span class="pill warn">⚠ ${state.lasterr}</span>`}
-                  ${state.canMode
-                    ? html`<span class="pill ${state.canConnected ? 'info' : 'danger'}">CAN #${state.canActiveNodeId}</span>`
-                    : html`<span class="pill ${offline ? 'danger' : 'info'}">UART</span>`}
-                </div>
-                <div class="hero-state">${friendly}</div>
-                <p class="hero-sub">Status: ${state.status}</p>
-                <div class="hero-metrics">
-                  ${getDashMetrics().map((name, idx) => {
-                    const sv = state.spotValues && state.spotValues[name];
-                    const unit = (sv && sv.unit && sv.unit.indexOf('=') === -1) ? sv.unit : '';
-                    const label = DASH_METRIC_LABELS[name] || name;
-                    const disp = !sv ? '—' : (sv.enums ? String(sv.display) : fmtNum(sv.value));
-                    return html`
-                    <div class="metric ${idx === 1 ? 'tone-active' : ''}" key=${name}>
-                      <span class="metric-label">${label}</span>
-                      <span class="metric-value">${disp}${unit && html`<span class="metric-unit">${unit}</span>`}</span>
-                      <${Sparkline} data=${state.history[name]} />
-                    </div>`;
-                  })}
-                  ${state.firmwareVersion && html`
-                    <div class="metric">
-                      <span class="metric-label">Firmware</span>
-                      <span class="metric-value" style="font-size:1.05rem;line-height:1.4;margin-top:6px">${state.firmwareVersion}</span>
-                    </div>
-                  `}
-                </div>
-              `;
-            })() : html`<${Spinner} />`}
-          </div>
-          <div id="top-right" class="dash-box">
-            <h3>Inverter messages</h3>
-            <pre><div>${state.messages}</div></pre>
-          </div>
-        </div>
-        <div class="dash-row">
-          <div class="dash-box" style="flex:1">
-            <h3>Command</h3>
-            <div id="commandoutput">${cmdOutput}</div>
-            <div style="display:flex;gap:6px;margin-top:8px">
-              <input type="text" id="commandinput" value=${cmd} oninput=${e => setCmd(e.target.value)} onkeyup=${e => e.keyCode === 13 && send()} style="flex:1" />
-              <button onclick=${send} style="padding:8px 18px;font-weight:600"><${Icon} n="send" />Send</button>
-            </div>
-          </div>
-        </div>
-        ${state.canMode && html`
-        <div class="dash-row">
-          <div class="dash-box" style="flex:1">
-            <h3>CAN Message</h3>
-            <${Gate} need="operator">
-            <div style="display:flex;gap:8px;align-items:flex-end">
-              <label style="font-size:.75rem;flex:1">CAN ID (hex)
-                <input type="text" value=${canId} oninput=${e => setCanId(e.target.value)} style="width:100%;font-size:.75rem;padding:4px 6px;font-family:var(--mono)" />
-              </label>
-              <label style="font-size:.75rem;flex:2">Data bytes (hex, space/comma separated)
-                <input type="text" value=${canData} oninput=${e => setCanData(e.target.value)} style="width:100%;font-size:.75rem;padding:4px 6px;font-family:var(--mono)" />
-              </label>
-              <button onclick=${async () => {
-                const r = await fetch('/can-send?canId=' + encodeURIComponent(canId) + '&data=' + encodeURIComponent(canData));
-                const json = await r.json();
-                setCmdOutput(o => o + 'CAN: ' + JSON.stringify(json) + '\n');
-              }} style="font-size:.75rem;padding:6px 14px;white-space:nowrap"><${Icon} n="send" />Send</button>
-            </div>
-            </${Gate}>
-          </div>
-        </div>
-        `}
-      </div>
-    </div>
-    ${confirmAction && html`
-      <${Modal} id="reset-modal" title=${confirmAction === 'inverter' ? 'Reset inverter' : 'Reboot ESP32'} onClose=${() => setConfirmAction(null)}>
-        <p>${confirmAction === 'inverter'
-          ? 'This will send a reset command to the inverter (STM32). The inverter will reboot. The web interface will remain accessible.'
-          : 'This will reboot the ESP32 itself. You will temporarily lose connection to the web interface.'}</p>
-        <div style="display:flex;gap:8px;margin-top:1rem">
-          <button onclick=${() => setConfirmAction(null)}>Cancel</button>
-          <button onclick=${async () => {
-            setConfirmAction(null);
-            if (confirmAction === 'inverter') {
-              await fetch('/reset-inverter');
-            } else {
-              await fetch('/reboot');
-            }
-          }} style="background:var(--red);color:#fff;border-color:transparent">Confirm</button>
-        </div>
-      </${Modal}>
-    `}
-  `;
-};
 
 // ==================== Parameters ====================
 
@@ -4308,6 +4163,58 @@ const tileFreeform = (type) => type !== 'radial' && type !== 'indicator' && type
 // Interactive tiles stream their PARAMETER for live state instead of a spot value
 const tileStreamName = (g) => g.name || ((g.type === 'toggle' || g.type === 'slider') ? g.param : '') || '';
 
+// Dashboard widgets: panel tiles on the same grid, in the same gauges.json
+// pages and the same editor as every gauge, so any tile can sit on the
+// Dashboard or on a gauge page (doc/REDESIGN.md, phase 3). The Dashboard tab
+// is simply the page gauges.json names as `dashboard`.
+const WIDGET_TYPES = new Set(['status', 'metric', 'messages', 'terminal', 'actions', 'cansend']);
+const NO_VALUE_TYPES = ['status', 'messages', 'terminal', 'actions', 'cansend'];
+const STATUS_NAMES = ['opmode', 'status', 'lasterr'];
+const statusFigs = (g) => (Array.isArray(g.figs) && g.figs.length ? g.figs : getDashMetrics());
+// Values a tile streams besides its own: the status tile follows the run
+// state and its figures (the global json poll is paused while a page streams)
+const tileExtraNames = (g) => g.type === 'status' ? [...STATUS_NAMES, ...statusFigs(g)] : [];
+const DASH_PAGE_ID = 'dash';
+const DASH_ACTIONS = [
+  { id: 'start', label: 'Start inverter in manual mode', icon: 'play', need: 'operator' },
+  { id: 'stop', label: 'Stop inverter', icon: 'stop', need: 'operator' },
+  { id: 'resetinv', label: 'Reboot Inverter', icon: 'rotate', need: 'operator' },
+  { id: 'reboot', label: 'Reboot ESP32', icon: 'power', need: 'admin' },
+];
+// The Dashboard as it was before widgets, rebuilt from tiles
+function defaultDashboardPage() {
+  return {
+    id: DASH_PAGE_ID, name: 'Dashboard', layout: 'stack', items: [
+      { type: 'status', x: 0, y: 0, w: 6, h: 3 },
+      { type: 'messages', x: 6, y: 0, w: 4, h: 3 },
+      { type: 'terminal', x: 0, y: 3, w: 10, h: 3 },
+      { type: 'actions', x: 0, y: 6, w: 10, h: 1 },
+      { type: 'cansend', x: 0, y: 7, w: 10, h: 2 },
+    ],
+  };
+}
+// gauges.json v4 names the Dashboard's page; layouts saved before that get
+// one, and there is always at least one gauge page besides it
+function withDashboardPage(pages, data) {
+  const want = data && data.dashboard;
+  let dash = want != null ? pages.find(p => String(p.id) === String(want)) : null;
+  let out = pages;
+  if (!dash) { dash = defaultDashboardPage(); out = [dash, ...pages]; }
+  if (!out.some(p => p.id !== dash.id)) {
+    const id = Math.max(0, ...out.map(p => (typeof p.id === 'number' ? p.id : 0))) + 1;
+    out = [...out, { id, name: 'Main', items: [] }];
+  }
+  return { pages: out, dashId: dash.id };
+}
+// Enum display for a raw number: exact match, else the set bits (bitfields)
+function enumText(v, enums) {
+  if (!enums) return fmtNum(v);
+  if (enums[v] != null) return String(enums[v]);
+  const parts = [];
+  for (const k in enums) if (Number(k) > 0 && (v & k)) parts.push(enums[k]);
+  return parts.length ? parts.join('|') : fmtNum(v, 0);
+}
+
 // A page condition ({ name, min, max, invert }) matches while the value sits
 // inside min..max INCLUSIVE — so equality is min = max (opmode 3..3 matches
 // only 3, not 2 or 4). A blank/missing bound is open-ended (min 500 alone =
@@ -4386,6 +4293,7 @@ function migrateGauges(data) {
         id: p.id || pi + 1,
         name: p.name || 'Page ' + (pi + 1),
         cond: (p.cond && p.cond.name) ? p.cond : undefined,
+        layout: p.layout === 'stack' ? 'stack' : undefined,
         items: (Array.isArray(p.items) ? p.items : []).map(g => {
           const type = g.type || 'radial';
           const floor = tileFloor(type);
@@ -4695,6 +4603,199 @@ const SliderTile = ({ g, value, editing, w, h }) => {
 // Fills the tile under the name label and measures itself with a
 // ResizeObserver, so gauges rescale live while a tile is being resized
 // (GridStack changes the DOM size continuously during the drag).
+// ==================== Dashboard widgets ====================
+
+// The run state: what the Dashboard's hero card always showed
+const StatusTile = ({ g, nameVals }) => {
+  const { state } = useContext(Store);
+  const sv = state.spotValues || {};
+  const live = (n) => (nameVals && typeof nameVals[n] === 'number' && !isNaN(nameVals[n])) ? nameVals[n]
+    : (sv[n] && typeof sv[n].value === 'number' ? sv[n].value : undefined);
+  const show = (n) => { const v = live(n); return v == null ? null : (sv[n] && sv[n].enums ? enumText(v, sv[n].enums) : fmtNum(v)); };
+  const figs = statusFigs(g);
+  const hist = useRef({});
+  figs.forEach(n => {
+    const v = live(n);
+    if (typeof v !== 'number' || isNaN(v)) return;
+    const a = hist.current[n] || (hist.current[n] = []);
+    if (a[a.length - 1] !== v) { a.push(v); if (a.length > 60) a.shift(); }
+  });
+  if (state.status == null && live('opmode') == null) return html`<${Spinner} />`;
+  const opmode = show('opmode') || state.opmode;
+  const offline = state.commError || (state.canMode && !state.canConnected);
+  const tone = offline ? 'danger' : opmodeTone(opmode);
+  const friendly = offline ? 'No connection to inverter'
+    : (OPMODE_FRIENDLY[opmode] || String(opmode == null ? '—' : opmode));
+  const lasterr = show('lasterr') || state.lasterr;
+  const hasErr = lasterr && String(lasterr) !== 'NONE' && String(lasterr) !== '0';
+  return html`
+    <div class="hero-top">
+      <span class="pill ${tone}"><span class="dot"></span>${offline ? 'Offline' : opmode}</span>
+      ${hasErr && html`<span class="pill warn">⚠ ${lasterr}</span>`}
+      ${state.canMode
+        ? html`<span class="pill ${state.canConnected ? 'info' : 'danger'}">CAN #${state.canActiveNodeId}</span>`
+        : html`<span class="pill ${offline ? 'danger' : 'info'}">UART</span>`}
+    </div>
+    <div class="hero-state">${friendly}</div>
+    <p class="hero-sub">Status: ${show('status') || state.status}</p>
+    <div class="hero-metrics">
+      ${figs.map((name, idx) => {
+        const s1 = sv[name];
+        const unit = (s1 && s1.unit && s1.unit.indexOf('=') === -1) ? s1.unit : '';
+        return html`
+        <div class="metric ${idx === 1 ? 'tone-active' : ''}" key=${name}>
+          <span class="metric-label">${DASH_METRIC_LABELS[name] || name}</span>
+          <span class="metric-value">${show(name) || '—'}${unit && html`<span class="metric-unit">${unit}</span>`}</span>
+          <${Sparkline} data=${(hist.current[name] || []).slice()} />
+        </div>`;
+      })}
+      ${state.firmwareVersion && html`
+        <div class="metric">
+          <span class="metric-label">Firmware</span>
+          <span class="metric-value" style="font-size:1.05rem;line-height:1.4;margin-top:6px">${state.firmwareVersion}</span>
+        </div>`}
+    </div>`;
+};
+
+// One value with its unit and a sparkline of the last minute or so
+const MetricTile = ({ g, value, unit, enums }) => {
+  const hist = useRef([]);
+  if (typeof value === 'number' && !isNaN(value)) {
+    const a = hist.current;
+    if (a[a.length - 1] !== value) { a.push(value); if (a.length > 60) a.shift(); }
+  }
+  const label = g.label || DASH_METRIC_LABELS[g.name] || g.name || 'tap to set up';
+  const shown = value == null || isNaN(value) ? '—'
+    : (enums ? enumText(value, enums) : fmtNum(value, g.decimals != null ? g.decimals : 1));
+  return html`
+    <div class="metric widget-metric">
+      <span class="metric-label">${label}</span>
+      <span class="metric-value">${shown}${unit && html`<span class="metric-unit">${unit}</span>`}</span>
+      ${g.spark !== false && html`<${Sparkline} data=${hist.current.slice()} width=${160} height=${30} />`}
+    </div>`;
+};
+
+// Inverter messages, refreshed while the tile is on screen
+const MessagesTile = ({ editing }) => {
+  const { state, dispatch } = useContext(Store);
+  // On the Dashboard the global poll already fetches 'errors'
+  const own = state.activeTab !== 'dashboard';
+  useEffect(() => {
+    if (editing || !own) return;
+    let alive = true, timer;
+    const tick = async () => {
+      try { const r = await api.getText('errors'); if (alive) dispatch({ type: 'SET_MESSAGES', payload: r }); } catch (e) {}
+      if (alive) timer = setTimeout(tick, 4000);
+    };
+    tick();
+    return () => { alive = false; clearTimeout(timer); };
+  }, [editing, own]);
+  return html`<h3>Inverter messages</h3><pre class="widget-pre"><div>${state.messages}</div></pre>`;
+};
+
+// The command terminal
+const TerminalTile = () => {
+  const { dispatch } = useContext(Store);
+  const [cmd, setCmd] = useState('');
+  const [out, setOut] = useState('');
+  const send = async () => {
+    const c = cmd.trim();
+    if (!c) return;
+    setOut(o => o + '> ' + c + '\n'); // echo the outgoing command
+    setCmd('');
+    dispatch({ type: 'SET_LOGGING', payload: true }); // pause the json poll so it can't contend for the single UART
+    dispatch({ type: 'SET_CMD_BUSY', payload: true });
+    try {
+      // Generous timeout: a silent inverter returns empty in ~0.2s; this only
+      // catches a hung ESP/connection and must clear a slow 'json' (~4s)
+      const reply = await api.getText(c, 0, 15000);
+      const text = reply.replace(/\s+$/, '');
+      setOut(o => o + (text ? text : '(no response)') + '\n');
+    } catch (e) {
+      const msg = (e && e.name === 'AbortError') ? 'timed out — no response' : (e.message || 'request failed');
+      setOut(o => o + 'error: ' + msg + '\n');
+    } finally {
+      dispatch({ type: 'SET_LOGGING', payload: false });
+      dispatch({ type: 'SET_CMD_BUSY', payload: false });
+    }
+  };
+  return html`
+    <h3>Command</h3>
+    <div id="commandoutput">${out}</div>
+    <div style="display:flex;gap:6px">
+      <input type="text" id="commandinput" aria-label="Command" value=${cmd} oninput=${e => setCmd(e.target.value)} onkeyup=${e => e.keyCode === 13 && send()} style="flex:1;min-width:0" />
+      <button onclick=${send} style="padding:8px 18px;font-weight:600;width:auto"><${Icon} n="send" />Send</button>
+    </div>`;
+};
+
+// Start/stop and reboot buttons
+const ActionsTile = ({ g }) => {
+  const { dispatch } = useContext(Store);
+  const [confirmAction, setConfirmAction] = useState(null); // 'inverter' | 'esp32'
+  const want = Array.isArray(g.btns) && g.btns.length ? g.btns : DASH_ACTIONS.map(a => a.id);
+  const run = (id) => {
+    if (id === 'start') api.getText('start 2').then(r => dispatch({ type: 'SET_MESSAGES', payload: r }));
+    else if (id === 'stop') api.getText('stop').then(r => dispatch({ type: 'SET_MESSAGES', payload: r }));
+    else setConfirmAction(id === 'resetinv' ? 'inverter' : 'esp32');
+  };
+  return html`
+    <div class="widget-actions">
+      ${DASH_ACTIONS.filter(a => want.includes(a.id)).map(a => html`
+        <${Gate} need=${a.need} key=${a.id}><button class=${a.id === 'reboot' ? 'danger' : ''} onclick=${() => run(a.id)}><${Icon} n=${a.icon} />${a.label}</button></${Gate}>`)}
+    </div>
+    ${confirmAction && html`
+      <${Modal} id="reset-modal" title=${confirmAction === 'inverter' ? 'Reset inverter' : 'Reboot ESP32'} onClose=${() => setConfirmAction(null)}>
+        <p>${confirmAction === 'inverter'
+          ? 'This will send a reset command to the inverter (STM32). The inverter will reboot. The web interface will remain accessible.'
+          : 'This will reboot the ESP32 itself. You will temporarily lose connection to the web interface.'}</p>
+        <div style="display:flex;gap:8px;margin-top:1rem">
+          <button onclick=${() => setConfirmAction(null)}>Cancel</button>
+          <button onclick=${async () => {
+            const which = confirmAction;
+            setConfirmAction(null);
+            await fetch(which === 'inverter' ? '/reset-inverter' : '/reboot');
+          }} style="background:var(--red);color:#fff;border-color:transparent">Confirm</button>
+        </div>
+      </${Modal}>`}`;
+};
+
+// Raw CAN frame sender (CAN mode)
+const CanSendTile = () => {
+  const { state } = useContext(Store);
+  const [canId, setCanId] = useState('0x180');
+  const [canData, setCanData] = useState('00 00 00 00 00 00 00 00');
+  const [result, setResult] = useState('');
+  if (!state.canMode) return html`<h3>CAN Message</h3><p class="widget-note">Sends a raw CAN frame. Available in CAN mode.</p>`;
+  return html`
+    <h3>CAN Message</h3>
+    <${Gate} need="operator">
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+      <label style="font-size:.75rem;flex:1;min-width:7em">CAN ID (hex)
+        <input type="text" value=${canId} oninput=${e => setCanId(e.target.value)} style="width:100%;font-size:.75rem;padding:4px 6px;font-family:var(--mono)" />
+      </label>
+      <label style="font-size:.75rem;flex:2;min-width:12em">Data bytes (hex, space/comma separated)
+        <input type="text" value=${canData} oninput=${e => setCanData(e.target.value)} style="width:100%;font-size:.75rem;padding:4px 6px;font-family:var(--mono)" />
+      </label>
+      <button onclick=${async () => {
+        const r = await fetch('/can-send?canId=' + encodeURIComponent(canId) + '&data=' + encodeURIComponent(canData));
+        setResult(JSON.stringify(await r.json()));
+      }} style="font-size:.75rem;padding:6px 14px;white-space:nowrap;width:auto"><${Icon} n="send" />Send</button>
+    </div>
+    </${Gate}>
+    ${result && html`<p class="widget-note" style="font-family:var(--mono)">${result}</p>`}`;
+};
+
+// While editing, a widget is inert: a tap configures it instead of firing it
+const WidgetTile = ({ g, value, unit, enums, nameVals, editing }) => html`
+  <div class="widget-body widget-${g.type}" inert=${editing || undefined}>
+    ${g.type === 'status' ? html`<${StatusTile} g=${g} nameVals=${nameVals} />`
+      : g.type === 'metric' ? html`<${MetricTile} g=${g} value=${value} unit=${unit} enums=${enums} />`
+      : g.type === 'messages' ? html`<${MessagesTile} editing=${editing} />`
+      : g.type === 'terminal' ? html`<${TerminalTile} />`
+      : g.type === 'actions' ? html`<${ActionsTile} g=${g} />`
+      : html`<${CanSendTile} />`}
+  </div>`;
+
 const GaugeTileBody = ({ g, title, value, value2, unit, enums, editing, canMode, presets, peaks }) => {
   const ref = useRef(null);
   const [dim, setDim] = useState({ w: 0, h: 0 });
@@ -4826,10 +4927,21 @@ const RecChart = ({ rec }) => {
   return html`<div style="height:300px"><canvas ref=${canvasRef}></canvas></div>`;
 };
 
-const Gauges = () => {
+// Gauge pages, and (dash) the Dashboard: the same grid, editor and
+// gauges.json, showing the page the file names as `dashboard`
+const Gauges = ({ dash = false }) => {
   const { state, dispatch } = useContext(Store);
-  const [pages, setPages] = useState([{ id: 1, name: 'Main', items: [] }]);
-  const [activePage, setActivePage] = useState(1);
+  const [pages, setPages] = useState(() => [{ ...defaultDashboardPage(), items: [] }, { id: 1, name: 'Main', items: [] }]);
+  const [dashId, setDashId] = useState(DASH_PAGE_ID);
+  const [activePage, setActivePage] = useState(dash ? DASH_PAGE_ID : 1);
+  const [nameVals, setNameVals] = useState({}); // latest streamed value per name (status tiles)
+  const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 599px)').matches);
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 599px)');
+    const on = () => setNarrow(mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
   const [lineVals, setLineVals] = useState({});
   const [editing, setEditing] = useState(false);
   const [editActionsOpen, setEditActionsOpen] = useState(false); // responsive-only expander for the editor's page/condition/starter sections
@@ -4903,8 +5015,14 @@ const Gauges = () => {
   const activeRef = useRef(activePage);
   activeRef.current = activePage;
 
-  const page = pages.find(p => p.id === activePage) || pages[0];
+  // The Dashboard tab shows only its page; the Gauges tab every other page
+  const shownPages = pages.filter(p => (dash ? p.id === dashId : p.id !== dashId));
+  const page = pages.find(p => p.id === activePage) || shownPages[0] || pages[0];
   const items = page.items;
+  // On phones a 'stack' page lists its tiles in reading order
+  const stacked = page.layout === 'stack' && narrow && !editing;
+  const stackRef = useRef(false);
+  stackRef.current = page.layout === 'stack';
   const itemsRef = useRef(items);
   itemsRef.current = items;
   const pagesRef = useRef(pages);
@@ -4917,14 +5035,14 @@ const Gauges = () => {
   // Waits for the layout fetch so it can't clobber a deep link with the
   // placeholder page, and so it runs again once the real pages are in.
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || dash) return;
     if (!/^#gauges(\/|$)/.test(location.hash)) return;
     history.replaceState(null, '', '#gauges/' + encodeURIComponent(page.name));
   }, [loaded, activePage, page.name]);
   useEffect(() => {
     const onHash = () => {
       const { tab, sub } = parseHash();
-      if (tab !== 'gauges' || !sub) return;
+      if (dash || tab !== 'gauges' || !sub) return;
       const want = sub.trim().toLowerCase();
       const p = pagesRef.current.find(x =>
         String(x.id) === want || String(x.name).trim().toLowerCase() === want);
@@ -4937,25 +5055,30 @@ const Gauges = () => {
   // Load saved layout (migrating v1 if needed) and fetch spot names for the picker
   useEffect(() => {
     (async () => {
+      let data = null;
       try {
         const r = await fetch('/gauges.json');
-        if (r.ok) {
-          const data = await r.json();
-          const migrated = migrateGauges(data);
-          let maxId = 0;
-          migrated.forEach(p => p.items.forEach(g => { if (typeof g.id === 'number' && g.id > maxId) maxId = g.id; }));
-          migrated.forEach(p => p.items.forEach(g => { if (!g.id) g.id = ++maxId; }));
-          nextId.current = maxId + 1;
-          setPages(migrated);
-          // Deep link: #gauges/<page name> (or page id) opens that page —
-          // lets a browser favourite target e.g. the Driving layout directly
-          const want = initialSubRef.current.trim().toLowerCase();
-          const linked = want && migrated.find(p =>
-            String(p.id) === want || String(p.name).trim().toLowerCase() === want);
-          setActivePage((linked || migrated[0]).id);
-          if (data && data.autoPage === false) setAutoPage(false);
-        }
+        if (r.ok) data = await r.json();
       } catch (e) { /* no saved layout */ }
+      const { pages: all, dashId: did } = withDashboardPage(migrateGauges(data), data);
+      let maxId = 0;
+      all.forEach(p => p.items.forEach(g => { if (typeof g.id === 'number' && g.id > maxId) maxId = g.id; }));
+      all.forEach(p => p.items.forEach(g => { if (!g.id) g.id = ++maxId; }));
+      nextId.current = maxId + 1;
+      setPages(all);
+      setDashId(did);
+      if (dash) {
+        setActivePage(did);
+      } else {
+        // Deep link: #gauges/<page name> (or page id) opens that page —
+        // lets a browser favourite target e.g. the Driving layout directly
+        const gaugePages = all.filter(p => p.id !== did);
+        const want = initialSubRef.current.trim().toLowerCase();
+        const linked = want && gaugePages.find(p =>
+          String(p.id) === want || String(p.name).trim().toLowerCase() === want);
+        setActivePage((linked || gaugePages[0]).id);
+      }
+      if (data && data.autoPage === false) setAutoPage(false);
       setLoaded(true);
       api.getJSON('json').then(json => dispatch({ type: 'SET_PARAMS', payload: json })).catch(() => {});
     })();
@@ -4964,7 +5087,7 @@ const Gauges = () => {
   const persist = async (nextPages, auto = autoPage) => {
     if (!can('operator')) return;
     try {
-      const blob = new Blob([JSON.stringify({ v: 3, autoPage: auto, pages: nextPages })], { type: 'application/json' });
+      const blob = new Blob([JSON.stringify({ v: 4, autoPage: auto, dashboard: dashId, pages: nextPages })], { type: 'application/json' });
       const fd = new FormData();
       fd.append('updatefile', blob, 'gauges.json');
       await fetch('/edit', { method: 'POST', body: fd });
@@ -5005,7 +5128,9 @@ const Gauges = () => {
       if (!(availW > 0)) return 1;
       let cell = availW / GRID_COLS;
       const rows = itemsRef.current.reduce((m, g) => Math.max(m, (g.y || 0) + (g.h || 1)), 0);
-      if (rows > 0) {
+      // A 'stack' page (the Dashboard) reads like a page and scrolls; only
+      // gauge pages shrink to fit the screen height
+      if (rows > 0 && !stackRef.current) {
         const availH = window.innerHeight - el.getBoundingClientRect().top - 8;
         const capCell = (availH - MARGIN * (rows + 1)) / rows;
         if (capCell > 30 && capCell < cell) cell = capCell; // floor ~30px/cell
@@ -5102,7 +5227,7 @@ const Gauges = () => {
     };
     // types join: a type switch (e.g. radial -> indicator) changes the
     // engine minimums, so re-init to reapply them
-  }, [activePage, layoutGen, items.length, editing, pages.length, items.map(g => g.type).join()]);
+  }, [activePage, layoutGen, items.length, editing, pages.length, items.map(g => g.type).join(), stacked]);
 
   // Enter edit mode, snapshotting the layout so Cancel can restore it
   const startEditing = () => {
@@ -5174,6 +5299,16 @@ const Gauges = () => {
     });
   };
 
+  const moveTileToPage = (id, targetId) => {
+    const target = pages.find(p => String(p.id) === String(targetId));
+    const tile = items.find(g => g.id === id);
+    if (!target || !tile || target.id === activePage) return;
+    const y = target.items.reduce((m, g) => Math.max(m, (g.y || 0) + (g.h || 3)), 0);
+    setPages(ps => ps.map(p => p.id === activePage ? { ...p, items: p.items.filter(g => g.id !== id) }
+      : p.id === target.id ? { ...p, items: [...p.items, { ...tile, x: 0, y }] } : p));
+    setConfigId(null);
+  };
+
   const updateGaugeConfig = (id, field, value) =>
     setPageItems(activePage, prev => prev.map(g => g.id !== id ? g : { ...g, [field]: value }));
 
@@ -5184,19 +5319,19 @@ const Gauges = () => {
   // scroll or a tap never triggers it. Text selection during a drag is
   // suppressed in CSS (.main-left user-select:none in view mode).
   const switchPageBy = (delta) => {
-    const idx = pages.findIndex(p => p.id === activePage);
+    const idx = shownPages.findIndex(p => p.id === activePage);
     const ni = idx + delta;
-    if (ni >= 0 && ni < pages.length) setActivePage(pages[ni].id);
+    if (ni >= 0 && ni < shownPages.length) setActivePage(shownPages[ni].id);
   };
   const hasPageInDir = (dir) => {
-    const idx = pages.findIndex(p => p.id === activePage);
-    return idx + dir >= 0 && idx + dir < pages.length;
+    const idx = shownPages.findIndex(p => p.id === activePage);
+    return idx + dir >= 0 && idx + dir < shownPages.length;
   };
   const clearSwipeHint = () => { const el = swipeHintRef.current; if (el) el.style.opacity = 0; };
   const onSwipeStart = (e) => {
     swipeRef.current = null;
     clearSwipeHint();
-    if (editing || pages.length < 2) return;
+    if (editing || shownPages.length < 2) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return; // left button only
     // Leave the header (pills, Auto-switch toggle, buttons) and any interactive
     // tile to their own gestures — only the gauge grid area starts a swipe
@@ -5265,7 +5400,7 @@ const Gauges = () => {
   const addPage = () => {
     const name = (prompt('Page name (e.g. Driving, Debug)') || '').trim();
     if (!name) return;
-    const id = Math.max(0, ...pages.map(p => p.id)) + 1;
+    const id = Math.max(0, ...pages.map(p => (typeof p.id === 'number' ? p.id : 0))) + 1;
     setPages([...pages, { id, name, items: [] }]);
     setActivePage(id);
   };
@@ -5275,11 +5410,11 @@ const Gauges = () => {
     setPages(pages.map(p => p.id !== activePage ? p : { ...p, name }));
   };
   const deletePage = () => {
-    if (pages.length <= 1) { alert('At least one page is required.'); return; }
+    if (dash || shownPages.length <= 1) { alert('At least one page is required.'); return; }
     if (!confirm('Delete page "' + page.name + '" and its ' + items.length + ' gauge(s)?')) return;
     const next = pages.filter(p => p.id !== activePage);
     setPages(next);
-    setActivePage(next[0].id);
+    setActivePage(next.find(p => p.id !== dashId).id);
   };
   // Replace everything with the bundled example set (data/gauges-sample.json,
   // ships with the firmware image) — a quick tour of every gauge type, page
@@ -5290,9 +5425,11 @@ const Gauges = () => {
       const r = await fetch('/gauges-sample.json');
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
-      if (!confirm('Replace your current gauges (' + pages.length + ' page' + (pages.length === 1 ? '' : 's') + ') with the sample set?\n\n'
+      if (!confirm('Replace your current gauges (' + shownPages.length + ' page' + (shownPages.length === 1 ? '' : 's') + ') with the sample set?\n\n'
         + 'Your current layout will be overwritten — use Export settings (Settings → Web Interface) first if you want a backup.')) return;
-      const migrated = migrateGauges(data);
+      // The Dashboard's page is kept: the sample only replaces gauge pages
+      const keepDash = pages.find(p => p.id === dashId);
+      const migrated = [...(keepDash ? [keepDash] : []), ...migrateGauges(data).filter(p => p.id !== dashId)];
       let maxId = 0;
       migrated.forEach(p => p.items.forEach(g => { if (typeof g.id === 'number' && g.id > maxId) maxId = g.id; }));
       migrated.forEach(p => p.items.forEach(g => { if (!g.id) g.id = ++maxId; }));
@@ -5300,7 +5437,7 @@ const Gauges = () => {
       const auto = data.autoPage !== false;
       setAutoPage(auto);
       setPages(migrated);
-      setActivePage(migrated[0].id);
+      setActivePage((migrated.find(p => p.id !== dashId) || migrated[0]).id);
       setLayoutGen(g => g + 1); // remount the grid — same-id pages reuse stale DOM
       persist(migrated, auto);
     } catch (e) { alert('Could not load the sample layout: ' + e.message); }
@@ -5322,7 +5459,7 @@ const Gauges = () => {
     // (type a value, a stream tick lands, the field snaps back).
     // Page-condition values ride along in the same fetch (deduplicated) so
     // conditional page display sees them even from a page with no gauges.
-    const condNames = (autoPage && !configId)
+    const condNames = (autoPage && !configId && !dash)
       ? pages.map(p => p.cond && p.cond.name).filter(Boolean) : [];
     // Formula tiles stream every identifier in their expression; line tiles
     // with a second series stream that name too
@@ -5330,13 +5467,18 @@ const Gauges = () => {
       : [...new Set([
           ...items.flatMap(g => g.calc ? calcNames(g.calc) : [tileStreamName(g)]),
           ...items.map(g => (g.type === 'line' && g.name2) || ''),
+          ...items.flatMap(tileExtraNames),
           ...condNames,
         ].filter(Boolean))];
     if (names.length === 0) {
       dispatch({ type: 'SET_LOGGING', payload: false });
       return;
     }
-    dispatch({ type: 'SET_LOGGING', payload: true });
+    // Gauge pages pause the global json poll to give the stream the UART;
+    // the Dashboard keeps it (link state, messages, everything else it
+    // always showed) and streams its tiles alongside
+    if (!dash) dispatch({ type: 'SET_LOGGING', payload: true });
+    const wantNames = items.some(g => g.type === 'status');
     let active = true;
     let es = null; // EventSource when the firmware pushes values (SSE)
     const interval = 100; // ms between samples
@@ -5349,6 +5491,7 @@ const Gauges = () => {
       if (vals.length !== names.length) return;
       const byName = {};
       names.forEach((n, i) => { byName[n] = parseFloat(vals[i]); });
+      if (wantNames) setNameVals(prev => ({ ...prev, ...byName }));
       // Session recorder rides the stream, whatever the transport
       if (recRef.current) {
         const rec = recRef.current;
@@ -5377,7 +5520,7 @@ const Gauges = () => {
       // Conditional page display: when a page's condition STARTS matching,
       // switch to it. A persisting match doesn't re-trigger, so the user can
       // still browse away; when nothing matches the current page stays.
-      if (autoPage && !editingRef.current) {
+      if (autoPage && !editingRef.current && !dash) {
         const hit = pagesRef.current.find(p => p.cond && p.cond.name && condMatch(p.cond, byName[p.cond.name]));
         const hitId = hit ? hit.id : null;
         if (hitId !== lastHitRef.current) {
@@ -5434,12 +5577,12 @@ const Gauges = () => {
   const spotNames = state.spotValues ? Object.keys(state.spotValues) : [];
 
   return html`
-    <div id="gauges" class="tabdiv main-content ${editing ? 'gauges-editing' : ''}" style="display:flex">
+    <div id=${dash ? 'dashboard' : 'gauges'} class="tabdiv main-content gauges-view ${editing ? 'gauges-editing' : ''}" style="display:flex">
       ${editing && html`
       <div class="main-right">
-        <h3 class="underline">Edit Gauges</h3>
+        <h3 class="underline">${dash ? 'Edit Dashboard' : 'Edit Gauges'}</h3>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">
-          <button onclick=${addGauge}><${Icon} n="plus" />Add Gauge</button>
+          <button onclick=${addGauge}><${Icon} n="plus" />${dash ? 'Add Tile' : 'Add Gauge'}</button>
           <button onclick=${() => { persist(pages); setEditing(false); }}><${Icon} n="check" />Save & Done</button>
           <button onclick=${cancelEditing} title="Discard changes made since you opened the editor"><${Icon} n="x" />Cancel & exit</button>
         </div>
@@ -5447,6 +5590,7 @@ const Gauges = () => {
         ${/* Page / condition / starter sections collapse behind a button on
             narrow screens so the editor doesn't fill the phone (same pattern
             as the Parameters actions) */ ''}
+        ${!dash && html`
         <button class="actions-expander" onclick=${() => setEditActionsOpen(!editActionsOpen)}>
           <span class="btn-ic" style=${'transition:transform .18s;transform:rotate(' + (editActionsOpen ? 180 : 0) + 'deg)'}><${Icon} n="chevron" /></span>
           Pages & options
@@ -5490,6 +5634,7 @@ const Gauges = () => {
         <button onclick=${loadSampleLayout} style="font-size:.75rem;padding:4px 10px"><${Icon} n="cloud" />Load sample layout</button>
         <p class="edit-help" style="font-size:.72rem;color:var(--text3);margin:.25rem 0 0">Six example pages (Driving, Battery, Temps, Charging, Debug, Controls) using standard value names — every gauge type included. Replaces your current gauges after confirmation.</p>
         </div>
+        `}
       </div>
       `}
       <div class="main-left ${editing ? '' : 'gauge-swipe'}" onpointerdown=${onSwipeStart}
@@ -5498,9 +5643,9 @@ const Gauges = () => {
         ${!editing && html`<div class="swipe-hint" ref=${swipeHintRef}></div>`}
         ${kiosk && html`<button class="kiosk-exit" title="Exit full screen" onclick=${() => setKiosk(false)}>✕</button>`}
         <div id="gauges-head" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem;gap:8px;flex-wrap:wrap">
-          <h2 style="margin:0">Gauges</h2>
+          <h2 style="margin:0">${dash ? 'Dashboard' : 'Gauges'}</h2>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            ${pages.some(p => p.cond && p.cond.name) && html`
+            ${!dash && pages.some(p => p.cond && p.cond.name) && html`
               <label class="toggle-row" id="auto-pages" style="width:auto;padding:4px 10px;font-size:.72rem" title="Conditional page display: switch pages automatically when a page condition matches">
                 <span class="toggle-label">Auto-switch</span>
                 <span class="switch sm">
@@ -5521,8 +5666,8 @@ const Gauges = () => {
             ${!editing && can('operator') && html`<button onclick=${startEditing} style="font-size:.75rem;padding:4px 12px"><${Icon} n="edit" />Edit Layout</button>`}
           </div>
         </div>
-        <div id="gauge-pages" class="seg" style="margin-bottom:.6rem">
-          ${pages.map(p => html`
+        ${!dash && html`<div id="gauge-pages" class="seg" style="margin-bottom:.6rem">
+          ${shownPages.map(p => html`
             <button key=${p.id} class="page-pill ${p.id === activePage ? 'active' : ''} ${editing ? 'draggable' : ''}"
               draggable=${editing} onclick=${() => setActivePage(p.id)}
               ondragstart=${editing ? onPillDragStart(p.id) : undefined}
@@ -5531,9 +5676,9 @@ const Gauges = () => {
               title=${editing ? 'Drag to reorder' : ''}>${p.name}</button>
           `)}
           ${editing && html`<button class="page-pill" title="Add page" onclick=${addPage}>+</button>`}
-        </div>
+        </div>`}
         ${items.length === 0 && !editing && html`<p style="color:var(--text3);font-size:.85rem;text-align:center;padding:2rem 0">Click Edit Layout to add a gauge.</p>`}
-        <div class="grid-stack" ref=${gridRef} key=${'page-' + activePage + '-g' + layoutGen}>
+        <div class=${'grid-stack' + (stacked ? ' stacked' : '')} ref=${gridRef} key=${'page-' + activePage + '-g' + layoutGen}>
           ${items.map(g => {
             const sv = state.spotValues && state.spotValues[g.name];
             // Formula tiles carry their own unit text (there's no spot value
@@ -5543,18 +5688,19 @@ const Gauges = () => {
             const tv = lineVals[g.id];
             const alarming = !!(g.alarm && g.warn != null && tv != null && tv >= g.warn);
             return html`
-            <div class="grid-stack-item" key=${g.id} gs-id=${g.id} gs-x=${g.x} gs-y=${g.y} gs-w=${g.w} gs-h=${g.h}>
+            <div class="grid-stack-item" key=${g.id} gs-id=${g.id} gs-x=${g.x} gs-y=${g.y} gs-w=${g.w} gs-h=${g.h}
+              style=${stacked ? 'order:' + ((g.y || 0) * 20 + (g.x || 0)) + ';--h:' + (g.h || 2) + ';--span:' + ((g.w || 2) >= 4 ? 2 : 1) : undefined}>
               ${/* In edit mode a tap opens the tile's settings (no overlay
                   buttons — on a 1x1 mobile tile they'd all overlap the
                   resize handle); drags are filtered by dragBusyRef */ ''}
-              <div class="grid-stack-item-content gauge-tile ${alarming ? 'alarming' : ''} ${g.transparent ? 'tile-clear' : ''}" title=${g.label || g.name || ''}
+              <div class="grid-stack-item-content gauge-tile ${WIDGET_TYPES.has(g.type) ? 'widget-tile' : ''} ${g.type === 'status' ? 'hero-card' : ''} ${alarming ? 'alarming' : ''} ${g.transparent ? 'tile-clear' : ''}" title=${g.label || g.name || ''}
                 style=${alarming ? '--alarmc:' + ((g.warnColor && /^#[0-9a-fA-F]{6}$/.test(g.warnColor)) ? g.warnColor : '#ef4444') : ''}
                 onclick=${editing ? (() => { if (!dragBusyRef.current) setConfigId(g.id); }) : undefined}>
                 ${/* 'tap to set up' only for truly unconfigured tiles — a
                     static-text tile is fully configured without a value or
                     label (its body IS the text), and an action tile shows its
                     label on the button itself (no name row) */ ''}
-                ${(() => {
+                ${WIDGET_TYPES.has(g.type) ? html`<${WidgetTile} g=${g} value=${lineVals[g.id]} unit=${unit} enums=${enums} nameVals=${nameVals} editing=${editing} />` : (() => {
                   const configured = g.type === 'text' ? !!(g.name || g.label || g.calc || (g.text && String(g.text).trim()))
                     : g.type === 'action' ? !!(g.label || g.param || g.canId || g.presetId != null)
                     : g.type === 'toggle' ? !!(g.label || g.param || g.canId)
@@ -5615,6 +5761,14 @@ const Gauges = () => {
                   <option value="action">Action button</option>
                   <option value="toggle">Toggle switch</option>
                   <option value="slider">Slider</option>
+                  <optgroup label="Dashboard widgets">
+                    <option value="status">Status</option>
+                    <option value="metric">Metric + sparkline</option>
+                    <option value="messages">Inverter messages</option>
+                    <option value="terminal">Command terminal</option>
+                    <option value="actions">Action buttons</option>
+                    <option value="cansend">CAN frame sender</option>
+                  </optgroup>
                 </select>
                 <label style="margin-left:8px">Colour</label>
                 <input type="color" value=${cfg.color || '#4cc9f0'} oninput=${e => updateGaugeConfig(cfg.id, 'color', e.target.value)}
@@ -5773,7 +5927,7 @@ const Gauges = () => {
                   <span style="font-size:.72rem;color:var(--text3)">flip the drag direction (Min on the right, Max on the left)</span>
                 </label>
               `}
-              ${!isInteractive && html`
+              ${!isInteractive && !NO_VALUE_TYPES.includes(cfg.type) && html`
                 <p class="modal-sect">Value</p>
                 <div style="display:flex;gap:8px;align-items:center">
                   <label style="width:4.5em">Value</label>
@@ -5826,7 +5980,7 @@ const Gauges = () => {
                 ` : ''}
                 ${cfg.type !== 'indicator' ? decimalsRow : ''}
               `}
-              ${!['text', 'action', 'toggle'].includes(cfg.type) && html`
+              ${!['text', 'action', 'toggle', ...NO_VALUE_TYPES].includes(cfg.type) && html`
                 <p class="modal-sect">Scale</p>
                 <div style="display:flex;gap:8px;align-items:center">
                   ${/* value != null ? : '' + undefined-on-blank lets a leading
@@ -5943,6 +6097,40 @@ const Gauges = () => {
               `}
                 `;
               })()}
+              ${cfg.type === 'status' && html`
+                <p class="modal-sect">Status</p>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <label style="width:4.5em">Figures</label>
+                  <input id="status-figs" type="text" value=${(cfg.figs || []).join(', ')} placeholder=${getDashMetrics().join(', ')}
+                    onchange=${e => { const v = e.target.value.split(/[\s,]+/).filter(Boolean).slice(0, 6); updateGaugeConfig(cfg.id, 'figs', v.length ? v : undefined); }}
+                    style="flex:1;padding:5px 8px;font-family:var(--mono)" />
+                </div>
+                <p style="font-size:.72rem;color:var(--text3);margin:0">Spot values shown under the state, comma separated. Empty uses the Dashboard metrics from Settings.</p>`}
+              ${cfg.type === 'actions' && html`
+                <p class="modal-sect">Buttons</p>
+                ${DASH_ACTIONS.map(a => {
+                  const on = !Array.isArray(cfg.btns) || !cfg.btns.length || cfg.btns.includes(a.id);
+                  return html`<label key=${a.id} style="display:flex;gap:8px;align-items:center;cursor:pointer">
+                    <input type="checkbox" checked=${on} style="width:auto" onchange=${e => {
+                      const cur = Array.isArray(cfg.btns) && cfg.btns.length ? cfg.btns : DASH_ACTIONS.map(x => x.id);
+                      const next = e.target.checked ? [...new Set([...cur, a.id])] : cur.filter(x => x !== a.id);
+                      updateGaugeConfig(cfg.id, 'btns', next);
+                    }} />${a.label}</label>`;
+                })}`}
+              ${cfg.type === 'metric' && html`
+                <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
+                  <span style="width:4.5em">Spark</span>
+                  <input type="checkbox" checked=${cfg.spark !== false} onchange=${e => updateGaugeConfig(cfg.id, 'spark', e.target.checked ? undefined : false)} style="width:auto" />
+                  <span style="font-size:.72rem;color:var(--text3)">sparkline of recent values</span>
+                </label>`}
+              <p class="modal-sect">Page</p>
+              <div style="display:flex;gap:8px;align-items:center">
+                <label style="width:4.5em">Move to</label>
+                <select id="tile-move" value=${String(activePage)} onchange=${e => moveTileToPage(cfg.id, e.target.value)}
+                  style="width:auto;min-width:11em;padding:5px 30px 5px 8px">
+                  ${pages.map(p => html`<option value=${String(p.id)}>${p.id === dashId ? 'Dashboard' : p.name}</option>`)}
+                </select>
+              </div>
               <div style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap">
                 <button onclick=${() => setConfigId(null)} style="width:auto"><${Icon} n="check" />Done</button>
                 <button onclick=${() => { duplicateGauge(cfg.id); setConfigId(null); }} style="width:auto">⧉ Duplicate</button>
@@ -6135,12 +6323,12 @@ const App = () => {
             <div id="communication-error-bar" class="communication-error-bar" style=${{ display: state.commError ? 'block' : 'none' }}>
               <p>Communication problem between ESP and STM</p>
             </div>
-            ${tab === 'dashboard' && html`<${Dashboard} />`}
+            ${tab === 'dashboard' && html`<${Gauges} key="dashboard" dash=${true} />`}
             ${tab === 'update' && html`<${Update} />`}
             ${tab === 'parameters' && html`<${Parameters} />`}
             ${tab === 'spotvalues' && html`<${SpotValues} />`}
             ${tab === 'plot' && html`<${Plot} />`}
-            ${tab === 'gauges' && html`<${Gauges} />`}
+            ${tab === 'gauges' && html`<${Gauges} key="gauges" />`}
             ${tab === 'logger' && html`<${Logger} />`}
             ${tab === 'canmapping' && html`<${CanMapping} />`}
             ${tab === 'files' && html`<${Files} />`}
