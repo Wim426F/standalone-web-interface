@@ -1022,8 +1022,7 @@
       "bg": {
         "file": "example-vehicle.webp",
         "cols": 4,
-        "rows": 2,
-        "ink": "light"
+        "rows": 2
       },
       "items": [
         {
@@ -1094,9 +1093,10 @@
           "type": "text",
           "decimals": 0,
           "x": 1,
-          "y": 1,
+          "y": 0,
           "w": 1,
-          "h": 1
+          "h": 2,
+          "badge": true
         },
         {
           "id": 128,
@@ -1106,9 +1106,10 @@
           "type": "text",
           "decimals": 0,
           "x": 2,
-          "y": 1,
+          "y": 0,
           "w": 1,
-          "h": 1
+          "h": 2,
+          "badge": true
         },
         {
           "id": 129,

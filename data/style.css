@@ -867,6 +867,20 @@ td { font-variant-numeric: tabular-nums; }
 /* transparent tiles: the gauge floats on the page with no card chrome
    (the edit-mode dashed outline still shows, so they stay manipulable) */
 .gauge-tile.tile-clear { background: transparent; border-color: transparent; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+/* Badge text tile: a small frosted pill in theme colours (it keeps them even
+   over a picture with "Text on it" set, since it brings its own card; these
+   resolve at the root, so a tile's ink override doesn't reach them) */
+:root { --badge-text: var(--text); --badge-text2: var(--text2); --badge-text3: var(--text3); }
+.tile-badge { display: inline-flex; flex-direction: column; align-items: center; gap: 1px; padding: .3em .8em .35em;
+  border-radius: .7em; line-height: 1.1; max-width: 100%; overflow: hidden; text-shadow: none;
+  background: color-mix(in srgb, var(--surface) 82%, transparent); border: 1px solid var(--border2);
+  backdrop-filter: blur(10px) saturate(130%); -webkit-backdrop-filter: blur(10px) saturate(130%);
+  box-shadow: 0 4px 14px rgba(0,0,0,.25); }
+.tile-badge .tb-name { font: 600 .48em/1.2 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--text3); white-space: nowrap; }
+.tile-badge .tb-val { font-family: var(--num); font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); white-space: nowrap; }
+.tile-badge .tb-unit { font-size: .55em; font-weight: 500; color: var(--text2); margin-left: .25em; }
+.gauge-tile.on-bg.ink-light .tile-badge, .gauge-tile.on-bg.ink-dark .tile-badge {
+  --text: var(--badge-text); --text2: var(--badge-text2); --text3: var(--badge-text3); }
 /* Clear tiles over a page background picture: text gets a soft halo so live
    readouts stay legible on it; the background's "Text on it" can pin light
    or dark text (a dark photo needs light text in either theme) */

@@ -4561,6 +4561,21 @@ const BarGauge = ({ value, min = 0, max = 100, unit, color, enums, decimals = 1,
 // Plain text tile: the live value as large text (with unit / enum label),
 // or fixed caption text when "Static text" is set — handy for labelling
 // dashboard sections.
+// Text tile as a Badge: name, value and unit in one small pill, sized to the
+// tile but deliberately modest, like the readouts on a car's status screen
+const TextBadge = ({ title, value, unit, enums, decimals, w, h }) => {
+  const v = (value == null || isNaN(value)) ? null : value;
+  const disp = v == null ? '—' : (enums ? String(enumLabel(enums, v)) : v.toFixed(decimals));
+  const fs = Math.max(11, Math.min(26, Math.round(Math.min(h * 0.22, (w * 0.9) / Math.max(3, disp.length + 1.5)))));
+  // The name shrinks (in em of the value) to fit a narrow tile, e.g. on a phone
+  const nameEm = Math.min(0.48, (w * 0.7) / (fs * Math.max(1, String(title).length) * 0.72));
+  return html`
+    <div class="tile-badge" style=${'font-size:' + fs + 'px'}>
+      ${title && title !== '—' && html`<span class="tb-name" style=${'font-size:' + nameEm.toFixed(3) + 'em'}>${title}</span>`}
+      <span class="tb-val">${disp}${unit && !enums && v != null && html`<span class="tb-unit">${unit}</span>`}</span>
+    </div>`;
+};
+
 const TextTile = ({ value, unit, enums, text, decimals, w, h }) => {
   const isStatic = !!(text && String(text).trim());
   let disp;
@@ -5232,7 +5247,10 @@ const GaugeTileBody = ({ g, title, value, value2, unit, enums, editing, canMode,
   // A Lamp only indicator is just the light (e.g. over a page background
   // picture); its title attribute still names it
   const bareLamp = g.type === 'indicator' && !!g.lampOnly;
-  const showName = !bareLamp && title !== '—' && (h >= 48 || compactName);
+  // A Badge text tile is a compact pill (name, value, unit) on its own card,
+  // readable wherever it sits, e.g. on a busy background photo
+  const badge = g.type === 'text' && !!g.badge && !(g.text && String(g.text).trim());
+  const showName = !bareLamp && !badge && title !== '—' && (h >= 48 || compactName);
   const nameH = !showName ? 0
     : compactName ? Math.max(8, Math.min(12, Math.round(h * 0.32)))
     : 16;
@@ -5256,6 +5274,9 @@ const GaugeTileBody = ({ g, title, value, value2, unit, enums, editing, canMode,
         : (g.type === 'indicator')
         ? html`<${IndicatorLamp} value=${value} min=${g.min} max=${g.max} color=${g.color || ''} enums=${enums}
             invert=${!!g.invert} bare=${bareLamp} px=${Math.max(14, Math.min(w, gh) - 4)} />`
+        : badge
+        ? html`<${TextBadge} title=${title} value=${value} unit=${unit} enums=${enums}
+            decimals=${g.decimals != null ? g.decimals : 1} w=${w} h=${h} />`
         : (g.type === 'text')
         ? html`<${TextTile} value=${value} unit=${unit} enums=${enums} text=${g.text || ''}
             decimals=${g.decimals != null ? g.decimals : 1} w=${w - 6} h=${gh - (gh < 20 ? 0 : 4)} />`
@@ -6356,6 +6377,11 @@ const Gauges = ({ dash = false }) => {
                       oninput=${e => updateGaugeConfig(cfg.id, 'text', e.target.value)} style="flex:1;padding:5px 8px" />
                   </div>
                   <p style="font-size:.72rem;color:var(--text3);margin:0">Leave Text empty to show the selected value as large text; set it for a static caption (section headers etc.).</p>
+                  <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
+                    <span style="width:4.5em">Badge</span>
+                    <input type="checkbox" id="gauge-badge" checked=${!!cfg.badge} onchange=${e => updateGaugeConfig(cfg.id, 'badge', e.target.checked ? true : undefined)} style="width:auto" />
+                    <span style="font-size:.72rem;color:var(--text3)">name, value and unit in a small pill — readable over a background picture</span>
+                  </label>
                 ` : ''}
                 ${cfg.type === 'line' ? html`
                   <div style="display:flex;gap:8px;align-items:center">

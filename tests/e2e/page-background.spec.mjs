@@ -124,12 +124,25 @@ test.describe('Page backgrounds', () => {
     const lamps = page.locator('#gauges .gauge-tile:has(.ind-lamp)');
     await expect(lamps).toHaveCount(sample.items.filter(g => g.type === 'indicator').length);
     await expect(lamps.filter({ has: page.locator('.gauge-tile-name') })).toHaveCount(2);
-    // Tiles over the car (the 4x2 block) get the picture's light text; the
-    // gauges beside it keep the theme's
+    // Only the tiles over the car (the 4x2 block) count as on the picture;
+    // its live temperatures are Badges, each a pill with name, value and unit
     const onCar = sample.items.filter(g => g.x < 4 && g.y < 2).length;
-    expect(sample.bg.ink).toBe('light');
-    await expect(page.locator('#gauges .gauge-tile.on-bg.ink-light')).toHaveCount(onCar);
     await expect(page.locator('#gauges .gauge-tile.on-bg')).toHaveCount(onCar);
+    const badges = page.locator('#gauges .on-bg .tile-badge');
+    await expect(badges).toHaveCount(sample.items.filter(g => g.badge).length);
+    await expect(badges.first().locator('.tb-name')).toHaveText('Inverter');
+    // (the mock doesn't report tmphs: a value with its unit, or a bare dash)
+    await expect(badges.first().locator('.tb-val')).toHaveText(/^(\d+°C|—)$/);
+  });
+
+  test('"Text on it" pins light or dark text on tiles over the picture only', async ({ page, mock }) => {
+    await seedImage(mock, 'img-car.png');
+    await mock.putFile('gauges.json', LAYOUT({ file: 'img-car.png', cols: 4, rows: 3, ink: 'light' }));
+    await openApp(page, mock);
+    await gotoTab(page, 'Gauges');
+    // The indicator at (2,2) is on the 4x3 block; the text tile at (6,3) is not
+    await expect(page.locator('#gauges .gauge-tile.on-bg.ink-light')).toHaveCount(1);
+    await expect(page.locator('#gauges .gauge-tile.on-bg.ink-light .ind-lamp')).toHaveCount(1);
   });
 
   test('a background can be a block of cells: Size and At place it on the grid', async ({ page, mock }) => {
