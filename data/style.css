@@ -561,11 +561,12 @@ body.kiosk #communication-error-bar { display: none !important; }
 .update-badge button:hover { background: none; border: none; transform: none; }
 
 /* segmented picker (UART | CAN Bus) */
-.seg { display: inline-flex; border: 1px solid var(--border2); border-radius: var(--radius-xs); overflow: hidden; }
-.seg button { border: none; border-radius: 0; background: var(--surface); font-size: .75rem; padding: 5px 14px; color: var(--text2); }
-.seg button:hover { transform: none; }
-.seg button + button { border-left: 1px solid var(--border2); }
-.seg button.sel { background: var(--accent-glow); color: var(--accent); font-weight: 700; }
+/* segmented controls (.seg, defined with the page switchers below): every
+   button inside is a rounded segment; the chosen one is the selected pill */
+.seg button { border: 1px solid transparent; border-radius: 10px; background: transparent; font-size: .82rem; font-weight: 620;
+  padding: 6px 14px; color: var(--text2); width: auto; }
+.seg button:hover { transform: none; background: var(--ctl-bg); color: var(--text); border-color: transparent; }
+.seg button.sel, .seg button.active { background: var(--on-bg); color: var(--on-fg); border-color: var(--on-bg); box-shadow: var(--glow-pri); }
 
 /* ===== FORMS ===== */
 input[type=number], input[type=text], input[type=password], select, textarea {
@@ -1127,5 +1128,10 @@ body.kiosk #topbar, body.kiosk #bottombar { display: none !important; }
   #topbar { padding: 8px 14px; min-height: 52px; margin-bottom: 10px; }
   .page-title { font-size: 1.1rem; }
   .savebar { top: 0; }
+  /* gauge/dashboard header actions: icons only, so they stay on one row
+     (the labels remain as aria-label and tooltip) */
+  #gauges-head .hd-label { display: none; }
+  #gauges-head > div { flex-wrap: nowrap !important; gap: 6px !important; }
+  #gauges-head button { min-width: 40px; min-height: 36px; justify-content: center; padding: 4px 10px !important; }
   .readonly-bar { bottom: calc(70px + env(safe-area-inset-bottom)); }
 }

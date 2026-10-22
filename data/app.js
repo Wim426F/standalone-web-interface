@@ -5722,9 +5722,9 @@ const Gauges = ({ dash = false }) => {
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
             ${!dash && pages.some(p => p.cond && p.cond.name) && html`
               <label class="toggle-row" id="auto-pages" style="width:auto;padding:4px 10px;font-size:.72rem" title="Conditional page display: switch pages automatically when a page condition matches">
-                <span class="toggle-label">Auto-switch</span>
+                <span class="toggle-label hd-label">Auto-switch</span>
                 <span class="switch sm">
-                  <input type="checkbox" checked=${autoPage} onchange=${e => {
+                  <input type="checkbox" aria-label="Auto-switch pages" checked=${autoPage} onchange=${e => {
                     const v = e.target.checked;
                     setAutoPage(v);
                     lastHitRef.current = null; // re-arm: a live match fires immediately
@@ -5735,10 +5735,11 @@ const Gauges = ({ dash = false }) => {
               </label>`}
             ${!editing && html`<button id="rec-btn" onclick=${() => (recording ? stopRec() : startRec())}
               title=${recording ? 'Stop and review the recording' : 'Record the streamed values for CSV export'}
+              aria-label=${recording ? 'Stop recording' : 'Record'}
               style=${'font-size:.75rem;padding:4px 12px' + (recording ? ';color:var(--red);border-color:var(--red)' : '')}>
-              ${recording ? '■ Stop' : '● Record'}</button>`}
-            ${!editing && html`<button id="fullscreen-btn" onclick=${() => setKiosk(true)} title="Full screen — gauges only, all chrome hidden" style="font-size:.75rem;padding:4px 12px">⛶ Full screen</button>`}
-            ${!editing && can('operator') && html`<button onclick=${startEditing} style="font-size:.75rem;padding:4px 12px"><${Icon} n="edit" />Edit Layout</button>`}
+              <span aria-hidden="true">${recording ? '■' : '●'}</span><span class="hd-label">${recording ? 'Stop' : 'Record'}</span></button>`}
+            ${!editing && html`<button id="fullscreen-btn" onclick=${() => setKiosk(true)} title="Full screen — gauges only, all chrome hidden" aria-label="Full screen" style="font-size:.75rem;padding:4px 12px"><span aria-hidden="true">⛶</span><span class="hd-label">Full screen</span></button>`}
+            ${!editing && can('operator') && html`<button onclick=${startEditing} title="Edit Layout" aria-label="Edit Layout" style="font-size:.75rem;padding:4px 12px"><${Icon} n="edit" /><span class="hd-label">Edit Layout</span></button>`}
           </div>
         </div>
         ${!dash && html`<div id="gauge-pages" class="seg" style="margin-bottom:.6rem">
