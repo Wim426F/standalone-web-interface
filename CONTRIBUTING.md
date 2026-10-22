@@ -3,6 +3,64 @@
 Thanks for contributing! This repo has an automated test suite that runs on
 every pull request — here's how to work with it locally.
 
+## Bring your feature back here
+
+Please open a pull request rather than keeping your changes in a fork. A
+handful of forks that each fix one thing and drift apart is how the ESP32 web
+interface ended up with several half-compatible versions; every user then has
+to pick which bugs they'd rather have. One shared version, tested by everyone's
+hardware, is better for all of us.
+
+- **Open the PR against `dev`.** Every PR runs the full suite (lint, E2E,
+  firmware unit tests, all four firmware builds) and builds images for both
+  boards, so it can be reviewed and tried quickly. Merged work reaches users as
+  a dev pre-release on the next push, and in the next stable release after that.
+- **Small and focused beats big and complete.** One feature or fix per PR. A
+  large change is welcome too: open an issue or a draft PR early so the design
+  can be agreed before you've written it all.
+- **Unsure it fits?** Ask in an issue or on the
+  [openinverter.org forum thread](https://openinverter.org/forum/viewtopic.php?p=95039#p95039).
+  Something specific to your setup can usually go in as an option that's off
+  by default, rather than a fork.
+- **Not a coder?** Bug reports with steps to reproduce, and testing dev builds
+  on your hardware, are just as valuable. Switch the Update page to the **Dev**
+  channel to get them.
+
+## Keeping features modular
+
+The app is built so most features plug in at one well-defined place without
+touching the rest. Following these keeps a PR easy to review and keeps other
+people's work merging cleanly.
+
+| You're adding | Put it here | Notes |
+|---|---|---|
+| Something to show live (a gauge style, a readout, a panel) | **A tile type** in `data/app.js`: a renderer component, an entry in the type list of the tile settings modal and, for panels, in `WIDGET_TYPES` | Tiles work on the Dashboard and every gauge page, are laid out by the grid editor and saved in `gauges.json`. Don't add a new tab for something a tile can do |
+| A whole new screen | A tab: a component, an entry in `tabs` and in `TAB_GROUPS` (sidebar section) | Use the existing pieces (`.dash-box` cards, `.seg` switchers, `button.primary`), not new one-off styles |
+| A device setting | `saveSettings()` / `loadSettings()` / `handleSettings()` in the firmware, plus the Settings tab | `settings.json` is mirrored into NVS, so it survives updates for free. Keep old settings files loading: absent keys mean "the old default" |
+| A UI preference | `uiprefs.json` (see `saveUiPrefsToDevice()`) | Also kept across updates |
+| A new HTTP endpoint | A row in `weblogic::ROUTES` (`src/web_logic.h`) with the right role, then the handler | Every request goes through the router; `scripts/test_route_guard.py` fails if a handler isn't in the table. Writes need operator, device/firmware changes need admin |
+| Parsing or validating input on the ESP | A function in `src/web_logic.h`, with tests in `test/test_web_logic` | Keep it free of hardware calls and globals so it builds and fuzzes on the host |
+| A new inverter/VCU command or value | Nothing: the UI reads parameters and spot values from the device | Use names, not positions, and cope with firmware that lacks a value ("—") |
+| Board-specific behaviour | A board preset (`CAN_BOARD_PRESETS`, `UART_BOARD_PRESETS`), a build flag in `platformio.ini`, or a runtime setting | Never a fork for one board. Prefer runtime settings; build flags only when it can't be decided at runtime |
+| Colours, spacing, type | The design tokens at the top of `data/style.css` | See [doc/REDESIGN.md](doc/REDESIGN.md). Both themes, and 4.5:1 contrast for small text |
+
+General rules:
+
+- **Off by default, opt in.** A new behaviour that changes what existing users
+  see or what the device does should be an option, unless it's clearly a fix.
+- **Data formats are versioned and migrate forward.** `gauges.json` has a `v`
+  (currently 4) and `migrateGauges()` upgrades older layouts. Bump it and add a
+  migration rather than breaking files people already have; the same goes for
+  settings.
+- **The device is the source of truth for permissions.** Hiding a button is a
+  courtesy; the route table is the enforcement.
+- **Mind the space.** The classic ESP32 app partition is over 90% full; say in
+  the PR what your change adds to firmware and filesystem size.
+- **Tests come with the feature.** An E2E test against the mock ESP for UI
+  behaviour (keep `tests/mock-esp/server.mjs` faithful to the firmware), a
+  native test for firmware logic. Bug fixes get a test that fails without the
+  fix.
+
 ## Setup
 
 - [Node.js](https://nodejs.org/) 20+ (for lint + E2E tests)

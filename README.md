@@ -371,6 +371,9 @@ The firmware is an Arduino sketch built with PlatformIO; the web interface in
 [`data/`](data/) is plain Preact + HTM with **no build step**, served gzipped from SPIFFS.
 Versions come from git tags (`git describe`) and show in the UI and at `/version`.
 
+- **Contribute back, don't fork off** - features and fixes are very welcome as pull requests against
+  `dev`, so everyone gets them in one tested version. [CONTRIBUTING.md](CONTRIBUTING.md) shows where a
+  new tile, tab, setting or endpoint plugs in so it stays modular.
 - **Branches** - work lands on `dev`; `dev` → `main` by pull request. Every push to `main` runs the
   tests and then publishes the next `vX.Y` release automatically.
 - **Tests** - `npm test` runs ESLint, checks `data/*.gz` are in sync, and runs the Playwright
