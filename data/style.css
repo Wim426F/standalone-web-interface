@@ -26,15 +26,15 @@
   --text: #16161a;
   --text2: #5c5c66;
   --text3: #686872;
-  --accent: #0284c7;
-  --accent2: #0369a1;
+  --accent: #0369a1;   /* 5.0:1 on the light ground (#0284c7 was 3.5:1) */
+  --accent2: #075985;
   --accent-glow: rgba(2,132,199,.12);
   --green: #0f9d63;
   --green2: #0c7d4f;
   --red: #c8232c;
   --amber: #9a5b00;
   /* state tones */
-  --tone-info: #0284c7;     --tone-info-bg: rgba(2,132,199,.1);
+  --tone-info: #0369a1;     --tone-info-bg: rgba(2,132,199,.1);
   --tone-active: #0b7a48;   --tone-active-bg: rgba(15,157,99,.12);
   --tone-warn: #9a5b00;     --tone-warn-bg: rgba(217,119,6,.12);
   --tone-danger: #c8232c;   --tone-danger-bg: rgba(220,38,38,.1);
@@ -52,6 +52,7 @@
   --ctl-bg: #ffffff; --ctl-hover: #f2f2f4;
   --row-hover: rgba(0,0,0,.025);
   --pill-ok-fg: #ffffff;
+  --pill-ok-a: #0b7a48; --pill-ok-b: #096b3f; /* white text at 5.4:1 */
   --glow-pri: 0 8px 26px rgba(2,132,199,.18);
   --font: "Inter Tight", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Code", "Consolas", monospace;
@@ -95,6 +96,7 @@
   --ctl-bg: rgba(255,255,255,.055); --ctl-hover: rgba(255,255,255,.11);
   --row-hover: rgba(255,255,255,.025);
   --pill-ok-fg: #03251a;
+  --pill-ok-a: var(--green); --pill-ok-b: var(--green2);
   --glow-pri: 0 8px 26px rgba(76,201,240,.22), 0 2px 10px rgba(84,230,164,.12);
 }
 @media (prefers-color-scheme: dark) {
@@ -131,6 +133,7 @@
     --ctl-bg: rgba(255,255,255,.055); --ctl-hover: rgba(255,255,255,.11);
     --row-hover: rgba(255,255,255,.025);
     --pill-ok-fg: #03251a;
+    --pill-ok-a: var(--green); --pill-ok-b: var(--green2);
     --glow-pri: 0 8px 26px rgba(76,201,240,.22), 0 2px 10px rgba(84,230,164,.12);
   }
 }
@@ -407,7 +410,7 @@ input:checked + .slider::before { transform: translateX(14px); }
 }
 .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse-dot 2s ease infinite; }
 .pill.info    { color: var(--tone-info);   background: var(--tone-info-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone-info) 32%, transparent); }
-.pill.active  { color: var(--pill-ok-fg); background: linear-gradient(135deg, var(--green), var(--green2)); box-shadow: 0 3px 14px color-mix(in srgb, var(--green) 30%, transparent); }
+.pill.active  { color: var(--pill-ok-fg); background: linear-gradient(135deg, var(--pill-ok-a), var(--pill-ok-b)); box-shadow: 0 3px 14px color-mix(in srgb, var(--green) 30%, transparent); }
 .pill.warn    { color: var(--tone-warn);   background: var(--tone-warn-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone-warn) 34%, transparent); }
 .pill.danger  { color: var(--tone-danger); background: var(--tone-danger-bg); }
 .pill.muted   { color: var(--text2);       background: var(--surface3); }
@@ -1059,7 +1062,7 @@ button.danger { color: var(--red); background: color-mix(in srgb, var(--red) 7%,
 .widget-body { align-items: stretch; text-align: left; }
 .widget-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-start; }
 .widget-actions button { width: auto; margin: 0; }
-.widget-terminal #commandoutput { flex: 1; min-height: 3em; overflow: auto; }
+.wt-terminal #commandoutput { flex: 1; min-height: 3em; overflow: auto; }
 .widget-pre { margin: 0; overflow: auto; }
 .widget-note { font-size: .78rem; color: var(--text3); margin: 0; }
 .widget-metric .metric-value { font-size: clamp(1.3rem, 2.2vw, 1.9rem); }

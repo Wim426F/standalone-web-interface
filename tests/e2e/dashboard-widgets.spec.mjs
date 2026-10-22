@@ -19,7 +19,7 @@ test.describe('Dashboard widgets', () => {
     await expect(dash.locator('.hero-state')).toHaveText('Inverter idle'); // the mock inverter starts in Off
     await expect(dash.locator('#commandinput')).toBeVisible();
     await expect(dash.locator('button', { hasText: 'Start inverter in manual mode' })).toBeVisible();
-    await expect(dash.locator('.widget-messages')).toContainText('Inverter messages');
+    await expect(dash.locator('.wt-messages')).toContainText('Inverter messages');
   });
 
   test('a v3 layout keeps its gauge pages and gains a Dashboard page on save', async ({ page, mock }) => {

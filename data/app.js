@@ -4859,7 +4859,7 @@ const CanSendTile = () => {
 
 // While editing, a widget is inert: a tap configures it instead of firing it
 const WidgetTile = ({ g, value, unit, enums, nameVals, editing }) => html`
-  <div class="widget-body widget-${g.type}" inert=${editing || undefined}>
+  <div class="widget-body wt-${g.type}" inert=${editing || undefined}>
     ${g.type === 'status' ? html`<${StatusTile} g=${g} nameVals=${nameVals} />`
       : g.type === 'metric' ? html`<${MetricTile} g=${g} value=${value} unit=${unit} enums=${enums} />`
       : g.type === 'messages' ? html`<${MessagesTile} editing=${editing} />`
