@@ -124,6 +124,12 @@ test.describe('Page backgrounds', () => {
     const lamps = page.locator('#gauges .gauge-tile:has(.ind-lamp)');
     await expect(lamps).toHaveCount(sample.items.filter(g => g.type === 'indicator').length);
     await expect(lamps.filter({ has: page.locator('.gauge-tile-name') })).toHaveCount(2);
+    // Tiles over the car (the 4x2 block) get the picture's light text; the
+    // gauges beside it keep the theme's
+    const onCar = sample.items.filter(g => g.x < 4 && g.y < 2).length;
+    expect(sample.bg.ink).toBe('light');
+    await expect(page.locator('#gauges .gauge-tile.on-bg.ink-light')).toHaveCount(onCar);
+    await expect(page.locator('#gauges .gauge-tile.on-bg')).toHaveCount(onCar);
   });
 
   test('a background can be a block of cells: Size and At place it on the grid', async ({ page, mock }) => {

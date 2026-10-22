@@ -5083,6 +5083,9 @@ function pageBg(bg) {
     file: String(bg.file), v: bg.v || undefined,
     fit: bg.fit === 'cover' ? 'cover' : undefined,
     pos: bg.pos === 'center' ? 'center' : undefined, // top-left otherwise
+    // Text colour for tiles over the picture: a dark photo needs light text
+    // in either theme (and vice versa); the theme's own colours when unset
+    ink: bg.ink === 'light' || bg.ink === 'dark' ? bg.ink : undefined,
     opacity: op >= 10 && op < 100 ? op : undefined,   // percent; full when unset
     x: x || undefined, y: y || undefined,
     cols: cols < GRID_COLS - x ? cols : undefined,    // to the right edge when unset
@@ -5091,6 +5094,12 @@ function pageBg(bg) {
 }
 // Rows the page must span to show its whole background
 const bgBottom = (bg) => bg ? (bg.y || 0) + bg.rows : 0;
+// Whether a tile overlaps the background's block of cells
+const onBg = (bg, g) => {
+  if (!bg) return false;
+  const x = bg.x || 0, y = bg.y || 0, cols = bg.cols || (GRID_COLS - x);
+  return (g.x || 0) < x + cols && (g.x || 0) + (g.w || 1) > x && (g.y || 0) < y + bg.rows && (g.y || 0) + (g.h || 1) > y;
+};
 // A missing file fails quietly: no picture, and a note only while editing
 const PageBackground = ({ bg, editing }) => {
   const [brokenSrc, setBrokenSrc] = useState(null);
@@ -5124,6 +5133,14 @@ const BackgroundSettings = ({ page, update }) => {
           <select id="bg-pos" value=${bg.pos || 'top-left'} onchange=${e => update({ ...bg, pos: e.target.value })} style=${sel}>
             <option value="top-left">Top left</option>
             <option value="center">Centred</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <label style="width:4.5em">Text on it</label>
+          <select id="bg-ink" value=${bg.ink || 'theme'} onchange=${e => update({ ...bg, ink: e.target.value === 'theme' ? undefined : e.target.value })} style=${sel}>
+            <option value="theme">Theme colours</option>
+            <option value="light">Light (dark picture)</option>
+            <option value="dark">Dark (light picture)</option>
           </select>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -6078,7 +6095,7 @@ const Gauges = ({ dash = false }) => {
               ${/* In edit mode a tap opens the tile's settings (no overlay
                   buttons — on a 1x1 mobile tile they'd all overlap the
                   resize handle); drags are filtered by dragBusyRef */ ''}
-              <div class="grid-stack-item-content gauge-tile ${WIDGET_TYPES.has(g.type) ? 'widget-tile' : ''} ${g.type === 'status' ? 'hero-card' : ''} ${alarming ? 'alarming' : ''} ${g.transparent ? 'tile-clear' : ''}" title=${g.label || g.name || ''}
+              <div class="grid-stack-item-content gauge-tile ${WIDGET_TYPES.has(g.type) ? 'widget-tile' : ''} ${g.type === 'status' ? 'hero-card' : ''} ${alarming ? 'alarming' : ''} ${g.transparent ? 'tile-clear' : ''} ${onBg(page.bg, g) ? 'on-bg' + (page.bg.ink ? ' ink-' + page.bg.ink : '') : ''}" title=${g.label || g.name || ''}
                 style=${alarming ? '--alarmc:' + ((g.warnColor && /^#[0-9a-fA-F]{6}$/.test(g.warnColor)) ? g.warnColor : '#ef4444') : ''}
                 onclick=${editing ? (() => { if (!dragBusyRef.current) setConfigId(g.id); }) : undefined}>
                 ${/* 'tap to set up' only for truly unconfigured tiles — a
