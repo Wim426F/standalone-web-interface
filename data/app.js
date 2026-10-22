@@ -4461,7 +4461,7 @@ function migrateGauges(data) {
 // Min = Max gates on EXACTLY that value (like page conditions): Min 3 / Max 3
 // lights only on 3, not 4. invert flips the lamp (lit while the value is
 // OFF/unlit) — the caption still names the value's real state.
-const IndicatorLamp = ({ value, min, max, color, enums, invert, px }) => {
+const IndicatorLamp = ({ value, min, max, color, enums, invert, px, bare }) => {
   const v = (value == null || isNaN(value)) ? null : value;
   const lo = (min == null) ? 0 : min;
   const hi = (max == null) ? lo : max;
@@ -4469,8 +4469,10 @@ const IndicatorLamp = ({ value, min, max, color, enums, invert, px }) => {
   const on = invert ? (v != null && !rawOn) : rawOn;
   const col = (color && /^#[0-9a-fA-F]{6}$/.test(color)) ? color : 'var(--accent)';
   // Lamp fills ~42% of the tile: enough presence to read at a glance while
-  // keeping clear air between it and the title above / state caption below
-  const d = Math.round(px * 0.42);
+  // keeping clear air between it and the title above / state caption below.
+  // A bare lamp (Lamp only) has neither, so it sits centred and a little
+  // larger, still small enough to fit a lamp drawn in a background picture
+  const d = Math.round(px * (bare ? 0.48 : 0.42));
   const label = v == null ? '—' : (enums ? enumLabel(enums, v) : (rawOn ? 'ON' : 'OFF'));
   return html`
     <div class="ind-wrap" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:${Math.round(px * 0.09)}px">
@@ -4481,7 +4483,7 @@ const IndicatorLamp = ({ value, min, max, color, enums, invert, px }) => {
         boxShadow: on ? ('0 0 ' + Math.round(px * 0.12) + 'px ' + col) : 'none',
         transition: 'background .15s, box-shadow .15s',
       }}></div>
-      ${px >= 40 && html`<div class="g-unit" style=${'font-size:' + Math.max(0.7, px / 230 * 1.0).toFixed(2) + 'rem'}>${label}</div>`}
+      ${px >= 40 && !bare && html`<div class="g-unit" style=${'font-size:' + Math.max(0.7, px / 230 * 1.0).toFixed(2) + 'rem'}>${label}</div>`}
     </div>`;
 };
 
@@ -5182,7 +5184,10 @@ const GaugeTileBody = ({ g, title, value, value2, unit, enums, editing, canMode,
   // tile uses the SAME fixed name row, so titles read as one consistent
   // size across a page of mixed tile types.
   const compactName = (g.type === 'indicator' || g.type === 'text') && h < 48 && h >= 18;
-  const showName = title !== '—' && (h >= 48 || compactName);
+  // A Lamp only indicator is just the light (e.g. over a page background
+  // picture); its title attribute still names it
+  const bareLamp = g.type === 'indicator' && !!g.lampOnly;
+  const showName = !bareLamp && title !== '—' && (h >= 48 || compactName);
   const nameH = !showName ? 0
     : compactName ? Math.max(8, Math.min(12, Math.round(h * 0.32)))
     : 16;
@@ -5205,7 +5210,7 @@ const GaugeTileBody = ({ g, title, value, value2, unit, enums, editing, canMode,
             w=${w - 4} h=${gh - 2} />`
         : (g.type === 'indicator')
         ? html`<${IndicatorLamp} value=${value} min=${g.min} max=${g.max} color=${g.color || ''} enums=${enums}
-            invert=${!!g.invert} px=${Math.max(14, Math.min(w, gh) - 4)} />`
+            invert=${!!g.invert} bare=${bareLamp} px=${Math.max(14, Math.min(w, gh) - 4)} />`
         : (g.type === 'text')
         ? html`<${TextTile} value=${value} unit=${unit} enums=${enums} text=${g.text || ''}
             decimals=${g.decimals != null ? g.decimals : 1} w=${w - 6} h=${gh - (gh < 20 ? 0 : 4)} />`
@@ -6397,6 +6402,11 @@ const Gauges = ({ dash = false }) => {
                   <span style="width:4.5em">Invert</span>
                   <input type="checkbox" checked=${!!cfg.invert} onchange=${e => updateGaugeConfig(cfg.id, 'invert', e.target.checked)} style="width:auto" />
                   <span style="font-size:.72rem;color:var(--text3)">lamp lit while the value is OFF</span>
+                </label>
+                <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
+                  <span style="width:4.5em">Lamp only</span>
+                  <input type="checkbox" id="gauge-lamp-only" checked=${!!cfg.lampOnly} onchange=${e => updateGaugeConfig(cfg.id, 'lampOnly', e.target.checked ? true : undefined)} style="width:auto" />
+                  <span style="font-size:.72rem;color:var(--text3)">no name or ON/OFF text — with Clear, just the light (e.g. over a background picture)</span>
                 </label>
                 <p style="font-size:.72rem;color:var(--text3);margin:0">The lamp lights in the chosen colour when the value rises past the midpoint between Min and Max — e.g. Min 0 / Max 1 switches at 0.5. Set Min = Max to light only on exactly that value (e.g. 3 and 3 for opmode 3).</p>`}
               ${cfg.type === 'line' && html`

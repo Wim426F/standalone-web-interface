@@ -1036,7 +1036,8 @@
           "y": 2,
           "w": 1,
           "h": 1,
-          "transparent": true
+          "transparent": true,
+          "lampOnly": true
         },
         {
           "id": 124,
@@ -1050,7 +1051,8 @@
           "y": 2,
           "w": 1,
           "h": 1,
-          "transparent": true
+          "transparent": true,
+          "lampOnly": true
         },
         {
           "id": 125,
@@ -1064,7 +1066,8 @@
           "y": 2,
           "w": 1,
           "h": 1,
-          "transparent": true
+          "transparent": true,
+          "lampOnly": true
         },
         {
           "id": 126,

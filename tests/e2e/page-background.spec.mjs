@@ -114,5 +114,27 @@ test.describe('Page backgrounds', () => {
     await page.locator('.page-pill', { hasText: 'Vehicle' }).click();
     await expect.poll(() => bgLoaded(page)).toBe(true);
     await expect(page.locator('#gauges .gauge-tile.tile-clear')).toHaveCount(5);
+    // Its lamps are Lamp only: just the light, no name row or ON/OFF caption
+    await expect(page.locator('#gauges .ind-lamp')).toHaveCount(3);
+    await expect(page.locator('#gauges .gauge-tile:has(.ind-lamp) .gauge-tile-name')).toHaveCount(0);
+    await expect(page.locator('#gauges .ind-wrap .g-unit')).toHaveCount(0);
+  });
+
+  test('Lamp only hides an indicator\'s name and caption, and is saved', async ({ page, mock }) => {
+    await mock.putFile('gauges.json', LAYOUT(undefined));
+    await openApp(page, mock);
+    await gotoTab(page, 'Gauges');
+    const tile = page.locator('#gauges .gauge-tile:has(.ind-lamp)');
+    await expect(tile.locator('.gauge-tile-name')).toHaveCount(1);
+    await page.locator('button', { hasText: 'Edit Layout' }).click();
+    await tile.click();
+    const modal = page.locator('.modal-content');
+    await modal.locator('#gauge-lamp-only').check();
+    await modal.locator('button', { hasText: 'Done' }).click();
+    await page.locator('button', { hasText: 'Save & Done' }).click();
+    await expect.poll(async () => (await savedPage(mock)).items.find(g => g.id === 1).lampOnly).toBe(true);
+    await expect(tile.locator('.gauge-tile-name')).toHaveCount(0);
+    await expect(tile.locator('.ind-wrap .g-unit')).toHaveCount(0);
+    await expect(tile.locator('.ind-lamp')).toBeVisible();
   });
 });
