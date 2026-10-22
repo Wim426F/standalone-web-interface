@@ -770,6 +770,27 @@ const tabGroupOf = (id) => (TAB_GROUPS.find(([, ids]) => ids.includes(id)) || ['
 const BOTTOM_TABS = [['dashboard', 'Home'], ['gauges', 'Gauges'], ['spotvalues', 'Values'], ['parameters', 'Params']];
 const closeNavDrawer = () => document.body.classList.remove('nav-open');
 
+// The OpenInverter mark: a graded ring around three phase waves (blue,
+// yellow, red), as in favicon.svg. `idp` keeps its gradient/clip ids unique
+// where more than one is on the page (navbar, sign-in card)
+const PHASE_WAVE = 'M-30 24 C -24 11, -18 11, -12 24 C -6 37, 0 37, 6 24 C 12 11, 18 11, 24 24 C 30 37, 36 37, 42 24 C 48 11, 54 11, 60 24';
+const LogoMark = ({ idp, cls, onclick, title }) => html`
+  <svg class=${cls || undefined} viewBox="0 0 48 48" onclick=${onclick} title=${title} aria-hidden=${title ? undefined : 'true'}>
+    <defs>
+      <linearGradient id=${idp + '-ring'} x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#d4d4d4" />
+        <stop offset="100%" stop-color="#636363" />
+      </linearGradient>
+      <clipPath id=${idp + '-clip'}><circle cx="24" cy="24" r="19.6" /></clipPath>
+    </defs>
+    <circle cx="24" cy="24" r="21.4" fill="none" stroke=${'url(#' + idp + '-ring)'} stroke-width="2.4" />
+    <g clip-path=${'url(#' + idp + '-clip)'} fill="none" stroke-width="2.4" stroke-linecap="round">
+      <path stroke="#5b9dff" opacity=".95" d=${PHASE_WAVE} />
+      <path stroke="#ffcf54" opacity=".95" transform="translate(12 0)" d=${PHASE_WAVE} />
+      <path stroke="#ff6b6b" opacity=".95" transform="translate(24 0)" d=${PHASE_WAVE} />
+    </g>
+  </svg>`;
+
 const Navbar = () => {
   const { state, dispatch } = useContext(Store);
   const active = state.activeTab;
@@ -778,21 +799,7 @@ const Navbar = () => {
   return html`
     <aside id="navbar">
       <div id="logo">
-        <svg viewBox="0 0 48 48" onclick=${() => dispatch({ type: 'TOGGLE_NAVBAR' })} title="Toggle navigation">
-          <defs>
-            <linearGradient id="logo-ring" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stop-color="#d4d4d4" />
-              <stop offset="100%" stop-color="#636363" />
-            </linearGradient>
-            <clipPath id="logo-clip"><circle cx="24" cy="24" r="19.6" /></clipPath>
-          </defs>
-          <circle cx="24" cy="24" r="21.4" fill="none" stroke="url(#logo-ring)" stroke-width="2.4" />
-          <g clip-path="url(#logo-clip)" fill="none" stroke-width="2.4" stroke-linecap="round">
-            <path stroke="#5b9dff" opacity=".95" d="M-30 24 C -24 11, -18 11, -12 24 C -6 37, 0 37, 6 24 C 12 11, 18 11, 24 24 C 30 37, 36 37, 42 24 C 48 11, 54 11, 60 24" />
-            <path stroke="#ffcf54" opacity=".95" transform="translate(12 0)" d="M-30 24 C -24 11, -18 11, -12 24 C -6 37, 0 37, 6 24 C 12 11, 18 11, 24 24 C 30 37, 36 37, 42 24 C 48 11, 54 11, 60 24" />
-            <path stroke="#ff6b6b" opacity=".95" transform="translate(24 0)" d="M-30 24 C -24 11, -18 11, -12 24 C -6 37, 0 37, 6 24 C 12 11, 18 11, 24 24 C 30 37, 36 37, 42 24 C 48 11, 54 11, 60 24" />
-          </g>
-        </svg>
+        <${LogoMark} idp="nav" onclick=${() => dispatch({ type: 'TOGGLE_NAVBAR' })} title="Toggle navigation" />
         <span class="brand-name navbar-text">OpenInverter</span>
       </div>
       <nav aria-label="Sections">
@@ -6916,10 +6923,7 @@ const LoginScreen = ({ note }) => {
   return html`
     <main id="login" class="login-wrap">
       <form class="login-card" onsubmit=${submit} autocomplete="on">
-        <svg class="login-logo" viewBox="0 0 48 48" aria-hidden="true">
-          <circle cx="24" cy="24" r="21.4" fill="none" stroke="currentColor" stroke-width="2.4" opacity=".5" />
-          <path fill="none" stroke="#5b9dff" stroke-width="2.4" stroke-linecap="round" d="M6 24 C 12 11, 18 11, 24 24 C 30 37, 36 37, 42 24" />
-        </svg>
+        <${LogoMark} idp="login" cls="login-logo" />
         <h1>Sign in</h1>
         <p class="login-sub">OpenInverter web interface</p>
         ${note && html`<p class="login-note" role="status">${note}</p>`}
