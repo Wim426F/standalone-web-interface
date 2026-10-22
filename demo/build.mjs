@@ -48,6 +48,8 @@ export function buildDemoSite(out = path.join(ROOT, '_site')) {
     }
     fs.copyFileSync(src, path.join(out, name));
   }
+  // Bundled web fonts live in a sub-folder
+  fs.cpSync(path.join(DATA, 'fonts'), path.join(out, 'fonts'), { recursive: true });
   for (const name of ['demo-data.js', 'demo-esp.js']) fs.copyFileSync(path.join(DEMO, name), path.join(out, name));
 
   let page = fs.readFileSync(path.join(out, 'index.html'), 'utf8');

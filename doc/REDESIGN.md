@@ -21,6 +21,16 @@ Homestead source the mockups were measured from:
 The mockup values (355.6 V, 4767 rpm …) are the live demo's data. Small extras such as "≈ 31 kWh left", "BMS ok" and the
 cell min/max are illustrations of what a widget *can* show, not existing features.
 
+## Progress
+
+| Phase | State | Checkpoint |
+|---|---|---|
+| 1. Tokens and fonts | **Done** | Neutral `#070708` ground, glass surfaces, 20/14/9 px radii, `--grad-signature`, new `--grad-edge`; light theme on Homestead's greys with deeper status colours. Inter Tight + JetBrains Mono bundled (`data/fonts/`, 85 KB, short names because SPIFFS paths max out at 31 characters); firmware serves `.woff2` as `font/woff2` (+40 bytes flash). Numbers now use the mono face. 245/245 E2E, screenshots regenerated. |
+| 2. Components | Next | |
+| 3. Shared widget system | Planned | |
+| 4. App chrome | Planned | |
+| 5. Polish | Planned | |
+
 ## Ground rules
 
 - **The firmware is not touched.** Everything here is `data/` (SPIFFS), so app flash stays at its current size and OTA images
