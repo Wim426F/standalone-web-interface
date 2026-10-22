@@ -4470,19 +4470,21 @@ const IndicatorLamp = ({ value, min, max, color, enums, invert, px, bare }) => {
   const col = (color && /^#[0-9a-fA-F]{6}$/.test(color)) ? color : 'var(--accent)';
   // Lamp fills ~42% of the tile: enough presence to read at a glance while
   // keeping clear air between it and the title above / state caption below.
-  // A bare lamp (Lamp only) has neither, so it sits centred and a little
-  // larger, still small enough to fit a lamp drawn in a background picture
-  const d = Math.round(px * (bare ? 0.48 : 0.42));
+  // A bare lamp (Lamp only) has neither: it's a glow that fades out by its
+  // edge, so its box is larger for a bright core about the same size
+  const d = Math.round(px * (bare ? 0.9 : 0.42));
   const label = v == null ? '—' : (enums ? enumLabel(enums, v) : (rawOn ? 'ON' : 'OFF'));
   return html`
     <div class="ind-wrap" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:${Math.round(px * 0.09)}px">
       <div class="ind-lamp ${on ? 'on' : ''}" style=${{
         width: d + 'px', height: d + 'px', borderRadius: '50%',
         // A bare lamp is invisible while off, so a lamp drawn in a background
-        // picture shows through and only glows when lit
-        background: on ? col : (bare ? 'transparent' : 'var(--surface)'),
-        border: '2px solid ' + (on ? col : (bare ? 'transparent' : 'var(--border2)')),
-        boxShadow: on ? ('0 0 ' + Math.round(px * 0.12) + 'px ' + col) : 'none',
+        // picture shows through, and lit it's a soft glow rather than a disc
+        background: bare
+          ? (on ? 'radial-gradient(circle, ' + col + ' 0 22%, color-mix(in srgb, ' + col + ' 45%, transparent) 42%, transparent 70%)' : 'transparent')
+          : (on ? col : 'var(--surface)'),
+        border: '2px solid ' + (bare ? 'transparent' : (on ? col : 'var(--border2)')),
+        boxShadow: on && !bare ? ('0 0 ' + Math.round(px * 0.12) + 'px ' + col) : 'none',
         transition: 'background .15s, box-shadow .15s',
       }}></div>
       ${px >= 40 && !bare && html`<div class="g-unit" style=${'font-size:' + Math.max(0.7, px / 230 * 1.0).toFixed(2) + 'rem'}>${label}</div>`}

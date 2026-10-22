@@ -184,7 +184,7 @@
 
   // Pictures the site ships for image tiles: /list offers them to pick,
   // the static host serves them. Uploading images is not part of the demo
-  const SITE_IMAGES = ['example-badge.png', 'example-vehicle.svg', 'logo.png'];
+  const SITE_IMAGES = ['example-badge.png', 'example-vehicle.webp', 'logo.png'];
   const isImageUpload = (body) => body instanceof FormData && [...body.values()].some(v =>
     v && typeof v === 'object' && (/^image\//.test(v.type) || /\.(png|jpe?g|webp|gif|svg)$/i.test(v.name || '')));
 
