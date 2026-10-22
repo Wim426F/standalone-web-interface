@@ -503,6 +503,27 @@ button:disabled:hover { background: var(--ctl-bg); border-color: var(--border); 
 .bar-gauge.vert .bar-hi { left: 50%; transform: translateX(-50%); top: 2px; }
 /* peak-hold marker: where the session's highest (lowest) value reached */
 .bar-gauge .bar-peak-tick { position: absolute; background: var(--text); opacity: .5; }
+/* Segmented: LED blocks with a small gap; lit ones take their --seg colour.
+   The blocks and bands sit in full-size wrappers (one per style) */
+.bar-gauge .bar-segs, .bar-gauge .bar-zones { position: absolute; inset: 0; }
+.bar-gauge.bar-segmented { background: transparent; border-color: transparent; }
+.bar-gauge .bar-seg { position: absolute; border-radius: 3px; background: color-mix(in srgb, var(--text) 13%, transparent); transition: background .2s; }
+.bar-gauge.horiz .bar-seg { top: 0; bottom: 0; border-left: 2px solid transparent; border-right: 2px solid transparent; background-clip: padding-box; }
+.bar-gauge.vert .bar-seg { left: 0; right: 0; border-top: 2px solid transparent; border-bottom: 2px solid transparent; background-clip: padding-box; }
+.bar-gauge .bar-seg.on { background-color: var(--seg); box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+/* A tall horizontal segmented bar puts its blocks in the lower half and the
+   value and end labels above them, clear of the bright blocks */
+.bar-gauge.seg-split .bar-seg { top: 50%; }
+.bar-gauge.seg-split .bar-val { bottom: 50%; }
+.bar-gauge.seg-split .bar-end { bottom: auto; top: 2px; }
+.bar-gauge.bar-segmented:not(.seg-split) .bar-val { text-shadow: 0 0 4px var(--bg), 0 0 10px var(--bg); }
+/* Zones: caution/danger bands along the top (or left) edge, a marker at the value */
+.bar-gauge .bar-zone { position: absolute; opacity: .75; }
+.bar-gauge.horiz .bar-zone { top: 0; height: 22%; }
+.bar-gauge.vert .bar-zone { left: 0; width: 22%; }
+.bar-gauge .bar-marker { position: absolute; background: var(--text); border-radius: 2px; transition: left .3s ease, bottom .3s ease; }
+.bar-gauge.horiz .bar-marker { top: 0; bottom: 0; width: 4px; margin-left: -2px; }
+.bar-gauge.vert .bar-marker { left: 0; right: 0; height: 4px; margin-bottom: -2px; }
 .bar-gauge.horiz .bar-peak-tick { top: 0; bottom: 0; width: 2px; margin-left: -1px; }
 .bar-gauge.vert .bar-peak-tick { left: 0; right: 0; height: 2px; margin-bottom: -1px; }
 
@@ -719,6 +740,11 @@ td { font-variant-numeric: tabular-nums; }
 .svg-gauge { position: relative; width: 230px; height: 230px; margin: 0 auto; }
 .svg-gauge svg { display: block; }
 .g-track { fill: none; stroke: var(--surface3); stroke-width: 13; stroke-linecap: round; }
+/* Segmented and Zone track radials: blocks and bands are plain arcs */
+.g-seg { transition: stroke .2s; }
+/* unlit blocks: a faint tint of the text colour, visible in either theme */
+.g-seg:not(.on) { stroke: color-mix(in srgb, var(--text) 13%, transparent); }
+.g-zone { opacity: .75; }
 .g-value {
   fill: none; stroke-width: 13; stroke-linecap: round;
   transition: stroke-dasharray .14s linear, stroke-dashoffset .14s linear, opacity .2s;

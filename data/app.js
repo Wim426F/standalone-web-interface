@@ -4164,6 +4164,51 @@ const hueShift = (hex, deg) => {
 // one way and regen the other, pivoting on a tick at the centre mark.
 // invertScale mirrors the whole scale (max at the arc's start, min at its
 // end), fill and labels included.
+// ---- Shared by the Segmented and Zones styles of radial and bar gauges ----
+const isHex = (c) => !!c && /^#[0-9a-fA-F]{6}$/.test(c);
+const mixHex = (a, b, t) => '#' + [1, 3, 5].map(i =>
+  Math.round(parseInt(a.slice(i, i + 2), 16) * (1 - t) + parseInt(b.slice(i, i + 2), 16) * t).toString(16).padStart(2, '0')).join('');
+const ZONE_CAUTION = '#f59e0b', ZONE_DANGER = '#ef4444';
+// Warn, caution and danger colours sweep their hue only gently (the normal
+// fill's ±21° would turn amber yellow-to-orange and red orange-to-pink)
+const WARN_SWEEP = 8;
+// Zone bands along the scale, in DISPLAYED fractions (an inverted scale is
+// mirrored): the normal colour, an amber caution band over the last 15% of
+// the span below Warn, and the danger colour (the Warn colour when one is
+// chosen) from Warn up. No Warn: a single normal band. Every band is drawn
+// as a hue-offset sweep like the fill: the normal band the fill's own, the
+// caution and danger bands a subtle ±WARN_SWEEP° around their colour
+function gaugeZones(lo, hi, warn, warnColor, base, invert) {
+  const span = (hi - lo) || 1;
+  const f = (val) => Math.min(1, Math.max(0, (val - lo) / span));
+  const bands = [];
+  if (warn != null && warn > lo && warn < hi) {
+    const wf = f(warn), cf = Math.max(0, wf - 0.15);
+    if (cf > 0) bands.push([0, cf, base]);
+    bands.push([cf, wf, ZONE_CAUTION], [wf, 1, isHex(warnColor) ? warnColor : ZONE_DANGER]);
+  } else bands.push([0, 1, base]);
+  return bands.map(([a, b, col]) => invert ? [1 - b, 1 - a, col] : [a, b, col]);
+}
+// One segment of a Segmented gauge: lit when its middle falls inside the
+// displayed fill, coloured by the value it stands for. Normal blocks follow
+// the fill's hue-offset gradient along the scale (cyan to green, or the
+// custom colour swept +21° to -21°), so the look matches the filled arc
+function segColour({ m, startFrac, lenFrac, lo, hi, invert, warn, wc, center, revColor, custom, color }) {
+  if (lenFrac <= 0.004 || m < startFrac || m > startFrac + lenFrac) return null;
+  const val = lo + (invert ? 1 - m : m) * ((hi - lo) || 1);
+  if (warn != null && val >= warn) return isHex(wc) ? hueShift(wc, WARN_SWEEP * (1 - 2 * m)) : wc;
+  if (center != null && val < center && isHex(revColor)) return revColor;
+  return custom ? hueShift(color, 21 - 42 * m) : mixHex('#4cc9f0', '#54e6a4', m);
+}
+// A gradient across the whole scale, shown only over the band [f0, f1]: the
+// band shows its own slice of it, so bands line up with the full gradient
+const bandBg = (grad, f0, f1, horiz) => {
+  const len = Math.max(0.001, f1 - f0);
+  const pos = len >= 0.999 ? 0 : (horiz ? f0 / (1 - len) : 1 - f0 / (1 - len)) * 100;
+  return 'background:' + grad + ';background-size:' + (horiz ? (100 / len).toFixed(2) + '% 100%' : '100% ' + (100 / len).toFixed(2) + '%')
+    + ';background-position:' + (horiz ? pos.toFixed(2) + '% 0' : '0 ' + pos.toFixed(2) + '%');
+};
+
 const SvgGauge = ({ id, value, min = 0, max = 100, unit, color, enums, px, decimals = 1, warn, warnColor, center, invertScale, peaks, gstyle, revColor }) => {
   const size = px || 230, c = size / 2, r = Math.round(size * 0.4);
   const sw = Math.max(8, Math.round(size * 0.057));
@@ -4197,7 +4242,15 @@ const SvgGauge = ({ id, value, min = 0, max = 100, unit, color, enums, px, decim
   // Needle dial: pointer over the track instead of a fill arc; the value
   // moves into the arc's bottom gap, out of the pointer's way
   const needle = gstyle === 'needle';
+  // Segmented: the sweep as LED blocks; Zones: caution/danger bands with a
+  // pointer instead of a fill (both keep the value in the centre)
+  const segments = gstyle === 'segments';
+  const zones = gstyle === 'zones';
   const pointFrac = invertScale ? 1 - frac : frac;
+  const segN = Math.max(12, Math.min(30, Math.round(size / 9)));
+  const zoneList = zones ? gaugeZones(min, max, warn, warnColor, 'url(#' + grad + ')', invertScale) : null;
+  const arcSeg = (f0, f1, key, stroke, w, cls) => html`<circle key=${key} class=${cls || ''} cx=${c} cy=${c} r=${r} fill="none" stroke=${stroke}
+    stroke-dasharray=${(arc * (f1 - f0)).toFixed(2) + ' ' + circ.toFixed(2)} stroke-dashoffset=${(-arc * f0).toFixed(2)} style=${'stroke-width:' + w + 'px'} />`;
   // Fraction along the DISPLAYED sweep for an arbitrary value (peak ticks)
   const dispFrac = (val) => {
     const f = Math.min(1, Math.max(0, (val - min) / span));
@@ -4224,13 +4277,33 @@ const SvgGauge = ({ id, value, min = 0, max = 100, unit, color, enums, px, decim
               <stop offset="100%" stop-color="#54e6a4" />
             `}
           </linearGradient>
+          ${zoneList && zoneList.filter(([, , col]) => isHex(col)).map(([, , col]) => html`
+            <linearGradient key=${col} id=${grad + col.slice(1)} x1="0" y1="1" x2="1" y2="0">
+              <stop offset="0%" stop-color=${hueShift(col, WARN_SWEEP)} />
+              <stop offset="50%" stop-color=${col} />
+              <stop offset="100%" stop-color=${hueShift(col, -WARN_SWEEP)} />
+            </linearGradient>`)}
         </defs>
         <g transform=${'rotate(135 ' + c + ' ' + c + ')'}>
+          ${segments ? Array.from({ length: segN }, (_, i) => {
+            const gap = 0.2 / segN;
+            const col = segColour({ m: (i + 0.5) / segN, startFrac, lenFrac, lo: min, hi: max, invert: invertScale,
+              warn, wc, center: hasCenter ? center : null, revColor, custom, color });
+            return arcSeg(i / segN + gap, (i + 1) / segN - gap, 's' + i, col || undefined, Math.round(sw * 1.15), col ? 'g-seg on' : 'g-seg');
+          })
+          : zones ? zoneList
+            .map(([f0, f1, col], i) => arcSeg(f0 + 0.003, f1 - 0.003, 'z' + i, isHex(col) ? 'url(#' + grad + col.slice(1) + ')' : col, Math.max(4, Math.round(sw * 0.5)), 'g-zone'))
+          : html`
           <circle class="g-track" cx=${c} cy=${c} r=${r} stroke-dasharray=${arc + ' ' + circ} style=${'stroke-width:' + sw + 'px'} />
           <circle class="g-value ${legacyOver ? 'over' : ''}" cx=${c} cy=${c} r=${r}
             stroke=${stroke} opacity=${!needle && lenFrac > 0.004 ? 1 : 0}
             stroke-dasharray=${(arc * lenFrac) + ' ' + circ}
-            stroke-dashoffset=${-(arc * startFrac)} style=${'stroke-width:' + sw + 'px'} />
+            stroke-dashoffset=${-(arc * startFrac)} style=${'stroke-width:' + sw + 'px'} />`}
+          ${zones && v != null && html`
+            <g class="g-needle g-pointer" style=${'transform-origin:' + c + 'px ' + c + 'px;transform:rotate(' + (pointFrac * SWEEP).toFixed(2) + 'deg)'}>
+              <line x1=${c + r - Math.round(sw * 1.3)} y1=${c} x2=${c + r + Math.round(sw * 0.7)} y2=${c}
+                stroke=${warned ? wc : 'var(--text)'} stroke-width=${Math.max(3, Math.round(size * 0.022))} stroke-linecap="round" />
+            </g>`}
           ${hasCenter && tickLine(tickFrac, 'g-center-tick', 'ct')}
           ${/* Peak-hold: markers at the session's highest (and, for centred
               gauges, lowest) value seen so far */ ''}
@@ -4495,7 +4568,7 @@ const IndicatorLamp = ({ value, min, max, color, enums, invert, px, bare }) => {
 // level bar or a column depending on the tile's shape (wider = horizontal,
 // taller = vertical). Same range/gradient/over-range behaviour as the
 // radial; value overlaid in the centre, min/max in the corners.
-const BarGauge = ({ value, min = 0, max = 100, unit, color, enums, decimals = 1, w, h, warn, warnColor, center, invertScale, peaks, revColor }) => {
+const BarGauge = ({ value, min = 0, max = 100, unit, color, enums, decimals = 1, w, h, warn, warnColor, center, invertScale, peaks, revColor, gstyle }) => {
   const v = (value == null || isNaN(value)) ? null : value;
   const lo = min != null ? min : 0;
   const hi = (max == null || max === lo) ? lo + 100 : max;
@@ -4532,12 +4605,29 @@ const BarGauge = ({ value, min = 0, max = 100, unit, color, enums, decimals = 1,
   const vfs = Math.max(9, Math.min(30, Math.round(Math.min(w, h) * 0.42),
     Math.round((w * 1.7) / Math.max(2, disp.length + (!enums && unit ? 1 : 0)))));
   const showEnds = (horiz ? w : h) >= 70 && Math.min(w, h) >= 30;
+  // Segmented: LED blocks along the bar; Zones: caution/danger bands along
+  // one edge with a marker at the value, in place of the fill
+  const segments = gstyle === 'segments', zones = gstyle === 'zones';
+  const along = horiz ? 'left:' : 'bottom:', size = horiz ? 'width:' : 'height:';
+  const segN = Math.max(8, Math.min(40, Math.round((horiz ? w : h) / 14)));
   return html`
-    <div class="bar-gauge ${horiz ? 'horiz' : 'vert'}" style=${'width:' + w + 'px;height:' + h + 'px'}>
-      <div class="bar-fill ${over ? 'over' : ''}"
-        style=${(horiz ? 'left:' : 'bottom:') + (startFrac * 100).toFixed(1) + '%;'
-          + (horiz ? 'width:' : 'height:') + (lenFrac * 100).toFixed(1) + '%;'
-          + (warned ? 'background:' + wc : over ? '' : 'background:' + (revC || grad))}></div>
+    <div class="bar-gauge ${horiz ? 'horiz' : 'vert'} ${segments ? 'bar-segmented' + (horiz && h >= 44 ? ' seg-split' : '') : ''} ${zones ? 'bar-zoned' : ''}" style=${'width:' + w + 'px;height:' + h + 'px'}>
+      ${/* Each style in its own slot, so switching styles never swaps an
+          element for a list in one place */ ''}
+      ${!segments && !zones && html`<div class="bar-fill ${over ? 'over' : ''}"
+        style=${along + (startFrac * 100).toFixed(1) + '%;'
+          + size + (lenFrac * 100).toFixed(1) + '%;'
+          + (warned ? 'background:' + wc : over ? '' : 'background:' + (revC || grad))}></div>`}
+      ${segments && html`<div class="bar-segs">${Array.from({ length: segN }, (_, i) => {
+        const col = segColour({ m: (i + 0.5) / segN, startFrac, lenFrac, lo, hi, invert: invertScale,
+          warn, wc, center: hasCenter ? center : null, revColor, custom, color });
+        return html`<div key=${'s' + i} class=${'bar-seg' + (col ? ' on' : '')}
+          style=${along + (i / segN * 100).toFixed(2) + '%;' + size + (100 / segN).toFixed(2) + '%' + (col ? ';--seg:' + col : '')}></div>`;
+      })}</div>`}
+      ${zones && html`<div class="bar-zones">${gaugeZones(lo, hi, warn, warnColor, grad, invertScale).map(([f0, f1, col], i) => html`
+        <div key=${'z' + i} class="bar-zone" style=${along + (f0 * 100).toFixed(2) + '%;' + size + ((f1 - f0) * 100).toFixed(2) + '%;'
+          + (col === grad ? bandBg(grad, f0, f1, horiz) : 'background:linear-gradient(' + dir + ',' + hueShift(col, WARN_SWEEP) + ',' + col + ' 50%,' + hueShift(col, -WARN_SWEEP) + ')')}></div>`)}</div>`}
+      ${zones && v != null && html`<div class="bar-marker" style=${along + ((invertScale ? 1 - frac : frac) * 100).toFixed(2) + '%' + (warned ? ';background:' + wc : '')}></div>`}
       ${hasCenter && html`<div class="bar-center-tick" style=${(horiz ? 'left:' : 'bottom:') + (tickFrac * 100).toFixed(1) + '%'}></div>`}
       ${/* Peak-hold markers: session max (and min on centred bars) */ ''}
       ${peaks && (() => {
@@ -5286,7 +5376,7 @@ const GaugeTileBody = ({ g, title, value, value2, unit, enums, editing, canMode,
         ? html`<${BarGauge} value=${value} unit=${unit} enums=${enums} color=${g.color || ''}
             decimals=${g.decimals != null ? g.decimals : 1} min=${g.min != null ? g.min : 0}
             max=${(g.max == null || g.max === 0) ? 4000 : g.max} w=${w - 8} h=${gh - 4}
-            warn=${g.warn} warnColor=${g.warnColor} center=${g.center} invertScale=${!!g.invertScale} peaks=${peaks} revColor=${g.revColor || ''} />`
+            warn=${g.warn} warnColor=${g.warnColor} center=${g.center} invertScale=${!!g.invertScale} peaks=${peaks} revColor=${g.revColor || ''} gstyle=${g.gstyle || ''} />`
         : (g.type === 'toggle')
         ? html`<${Gate} need="operator"><${ToggleTile} g=${g} value=${value} canMode=${canMode} editing=${editing} px=${Math.max(20, Math.min(w, gh) - 4)} /></${Gate}>`
         : (g.type === 'slider')
@@ -6457,16 +6547,23 @@ const Gauges = ({ dash = false }) => {
                   <input id="gauge-peak" type="checkbox" checked=${!!cfg.peak} onchange=${e => updateGaugeConfig(cfg.id, 'peak', e.target.checked || undefined)} style="width:auto" />
                   <span style="font-size:.72rem;color:var(--text3)">hold a marker at the session's highest value (and lowest, on centred gauges)</span>
                 </label>
-                ${(cfg.type || 'radial') === 'radial' && html`
+                ${(() => {
+                  // Style: the default fill, or an alternative look; Zones
+                  // reads its bands from Warn, so it nudges toward setting one
+                  const radial = (cfg.type || 'radial') === 'radial';
+                  const opts = radial
+                    ? [['', 'Filled arc'], ['needle', 'Needle dial'], ['segments', 'Segmented'], ['zones', 'Zone track']]
+                    : [['', 'Filled bar'], ['segments', 'Segmented LED'], ['zones', 'Zone bands']];
+                  return html`
                   <div style="display:flex;gap:8px;align-items:center">
                     <label style="width:4.5em">Style</label>
-                    <select id="gauge-style" value=${cfg.gstyle || 'arc'} onchange=${e => updateGaugeConfig(cfg.id, 'gstyle', e.target.value === 'needle' ? 'needle' : undefined)}
+                    <select id="gauge-style" value=${cfg.gstyle || ''} onchange=${e => updateGaugeConfig(cfg.id, 'gstyle', e.target.value || undefined)}
                       style="width:auto;min-width:9.5em;padding:5px 30px 5px 8px">
-                      <option value="arc">Filled arc</option>
-                      <option value="needle">Needle dial</option>
+                      ${opts.map(([v, label]) => html`<option key=${v} value=${v}>${label}</option>`)}
                     </select>
                   </div>
-                `}
+                  ${cfg.gstyle === 'zones' && cfg.warn == null && html`<p style="font-size:.72rem;color:var(--text3);margin:0">Set Warn ≥ to get caution and danger bands — without it the track is one band.</p>`}`;
+                })()}
               `}
               ${cfg.type === 'indicator' && html`
                 <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
