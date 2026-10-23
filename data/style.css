@@ -1251,3 +1251,14 @@ body.kiosk #topbar, body.kiosk #bottombar { display: none !important; }
 :root[data-theme="dark"] { color-scheme: dark; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { color-scheme: dark; } }
 option { background: var(--surface2); color: var(--text); }
+/* Group headings in the list (e.g. "Dashboard widgets"): a muted label on
+   the list's own background, not the browser's white strip */
+optgroup { background: var(--surface2); color: var(--text3); font-style: normal; font-weight: 600; }
+/* Chrome builds a select's popup from the select's own background colour: the
+   dark theme's translucent --ctl-bg made it fall back to its light palette
+   (white group headings, a pale highlight behind light text). A solid colour
+   that looks the same (the tint over the surface) keeps the popup dark */
+:root[data-theme="dark"] select:not(.styled) { background-color: color-mix(in srgb, #fff 5.5%, var(--surface)); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) select:not(.styled) { background-color: color-mix(in srgb, #fff 5.5%, var(--surface)); }
+}
