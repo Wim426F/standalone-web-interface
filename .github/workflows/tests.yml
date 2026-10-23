@@ -85,6 +85,26 @@ jobs:
       - name: Unit tests under sanitizers
         run: pio test -e native_asan
 
+  pyapp:
+    name: PC backend unit tests (pyapp)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # Installing builds the wheel too, which embeds data/ (hatch_build.py)
+      - name: Install
+        run: pip install "./pyapp[dev]"
+
+      # SDO client, CAN bus, flasher and the HTTP server against a simulated
+      # inverter on a python-can virtual bus
+      - name: Unit tests
+        run: python -m pytest pyapp/tests -v
+
   e2e:
     name: E2E (Playwright vs mock ESP)
     runs-on: ubuntu-latest
@@ -99,6 +119,14 @@ jobs:
 
       - name: Install
         run: npm ci
+
+      # pc-backend.spec.mjs drives the real PC backend (pyapp/ --simulate)
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install PC backend
+        run: pip install ./pyapp
 
       # Browser binaries are keyed on the exact Playwright version, so a
       # dependency bump re-downloads them; OS packages are always installed
