@@ -841,7 +841,9 @@ td { font-variant-numeric: tabular-nums; }
      eats most of the screen — drop the explanatory help text there */
   .edit-help { display: none; }
   table { font-size: .8rem; }
-  #spotValues { font-size: .9rem; }
+  /* full width whatever the layout, so long names wrap instead of
+     stretching the table past the screen */
+  #spotValues { font-size: .9rem; width: 100% !important; }
   thead th, tbody td { padding: 6px 6px; }
   /* compact fixed columns so names get the space (!important beats the
      inline header widths) */

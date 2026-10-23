@@ -173,7 +173,7 @@ export function createMockEsp({ port = 0, ssePort = 0 } = {}) {
           const v = findParamByName(n.trim());
           return v === undefined ? '0' : fmt2(v.value);
         }).join(',');
-        return Array.from({ length: Math.min(parseInt(reps) || 1, 100) }, line).join('\n') + '\n';
+        return Array.from({ length: Math.min(parseInt(reps) || 1, 500) }, line).join('\n') + '\n';
       }
       case 'save': return 'Parameters saved';
       case 'load': return 'Parameters loaded';

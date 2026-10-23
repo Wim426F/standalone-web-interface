@@ -1600,15 +1600,22 @@ const SpotValues = () => {
     : (docstrings.get(v.name) || 'No description available.');
   const svTipEmpty = (v) => !v.virtual && !docstrings.get(v.name);
 
-  // Enable multi-column only if table content overflows available height
+  // Enable multi-column only if table content overflows available height,
+  // and only where two columns fit (350px each) - on a phone it would just
+  // be one column with different widths. The space is measured from the
+  // list's place in the page, not on screen: on a phone the whole page
+  // scrolls, so an on-screen top grew as you scrolled down and flipped the
+  // layout (and the name column's width) part-way through the list
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
     const check = () => {
       const table = el.querySelector('table');
       if (!table) return;
-      const availH = window.innerHeight - el.getBoundingClientRect().top - 40;
-      setMultiCol(table.scrollHeight > availH);
+      let top = 0;
+      for (let n = el; n && n !== document.body; n = n.offsetParent) top += n.offsetTop;
+      const availH = window.innerHeight - top - 40;
+      setMultiCol(el.clientWidth >= 700 && table.scrollHeight > availH);
     };
     check();
     // Re-check when filtered items change
@@ -2381,13 +2388,17 @@ const FieldPicker = ({ value, spotNames, onChange }) => {
   `;
 };
 
+// Most rows one `stream` read asks for, and most values in all: the ESP
+// holds the whole reply in RAM before sending it on (2500 values ~ 20 KB)
+const STREAM_MAX = 500, STREAM_VALUES_MAX = 2500;
+
 const Plot = () => {
   const { state, dispatch } = useContext(Store);
   const [plots, setPlots] = useState([]);
   const [plotting, setPlotting] = useState(false);
   const [editing, setEditing] = useState(false);
   const [maxValues, setMaxValues] = useState(500);
-  const [burstLength, setBurstLength] = useState(5);
+  const [burstLength, setBurstLength] = useState(10);
   const [sampleTick, setSampleTick] = useState(0); // bumps once per fetch of new samples
   const valsRef = useRef({});
   const queueRef = useRef([]); // samples pending chart draw (several per fetch with Burst)
@@ -2412,18 +2423,47 @@ const Plot = () => {
     // Long name lists overflow the inverter's 128-char UART command buffer —
     // fall back to chunked single samples (no burst) rather than truncating
     const chunked = !state.canMode && ('get ' + combined).length > 128;
+    // Over UART the inverter's own `stream <n> <names>` (libopeninv, so
+    // stm32-sine and ZombieVerter alike) samples in a tight loop and answers
+    // with all n rows at once: 100 rows of 3 values in ~60 ms, where
+    // get&repeat pays a full UART round trip per sample (~1.2 s for 100).
+    // It takes at most 10 names and isn't there over CAN (the ESP answers
+    // `get` via SDO), so those keep get&repeat. A batch is a burst of
+    // back-to-back samples, ideal for fast signals (angle, id, iq)
+    const streamN = Math.max(1, Math.min(STREAM_MAX, Math.floor(STREAM_VALUES_MAX / allNames.length), burstLength));
+    const useStream = !state.canMode && allNames.length <= 10 && ('stream ' + streamN + ' ' + combined).length <= 128;
 
     const loop = async () => {
       if (!running) return;
       try {
-        if (chunked) {
+        if (useStream) {
+          const text = await api.getText('stream ' + streamN + ' ' + combined, 0, 5000);
+          if (!running) return;
+          // One CSV row per sample; keep only whole rows, so a cut-off last
+          // line or an error message never shifts values onto another series
+          queueRef.current = [];
+          for (const line of text.split(/\r?\n/)) {
+            const vals = line.trim().split(',');
+            if (vals.length !== allNames.length) continue;
+            const nums = vals.map(Number);
+            if (nums.some(isNaN) || vals.some(x => x.trim() === '')) continue;
+            const sample = {};
+            allNames.forEach((name, i) => { sample[name] = nums[i]; });
+            queueRef.current.push(sample);
+          }
+          if (queueRef.current.length) {
+            valsRef.current = queueRef.current[queueRef.current.length - 1]; // latest, for live readouts
+            setSampleTick(t => t + 1);
+          }
+        } else if (chunked) {
           const sample = await api.getValuesChunked(allNames);
           if (!running) return;
           queueRef.current = [sample];
           valsRef.current = sample;
           setSampleTick(t => t + 1);
         } else {
-          const text = await api.getText('get ' + combined, burstLength);
+          // get&repeat: one UART/SDO round trip per sample (the firmware caps it at 100)
+          const text = await api.getText('get ' + combined, Math.min(100, Math.max(0, burstLength)));
           if (!running) return;
           const vals = text.match(/[\-\d\.]+/g) || [];
           // Only accept whole sample groups: an error reply (or a truncated
@@ -2490,7 +2530,7 @@ const Plot = () => {
           const items = data.plots.map(p => ({ ...p, id: p.id || nextId.current++ }));
           setPlots(items);
           setMaxValues(data.maxValues || 500);
-          setBurstLength(data.burstLength || 5);
+          setBurstLength(data.burstLength || 10);
           if (items.length > 0) nextId.current = Math.max(...items.map(p => p.id)) + 1;
         }
       }
@@ -2519,9 +2559,10 @@ const Plot = () => {
           <div style="display:flex;gap:6px;align-items:center">
             <label style="font-size:.8rem;font-weight:500">Points</label>
             <input type="number" value=${maxValues} oninput=${e => setMaxValues(parseInt(e.target.value)||100)} style="width:5em;font-size:.8rem;padding:4px 6px" />
-            <label style="font-size:.8rem;font-weight:500">Burst</label>
-            <input type="number" value=${burstLength} oninput=${e => setBurstLength(parseInt(e.target.value)||1)} style="width:4em;font-size:.8rem;padding:4px 6px" />
+            <label style="font-size:.8rem;font-weight:500" title="Samples per read">Burst</label>
+            <input id="plot-burst" type="number" min="1" max=${STREAM_MAX} value=${burstLength} oninput=${e => setBurstLength(Math.max(1, parseInt(e.target.value) || 1))} style="width:4.5em;font-size:.8rem;padding:4px 6px" />
           </div>
+          <p class="edit-help" style="font-size:.72rem;color:var(--text3);margin:0">Samples per read. Over UART with up to 10 values the inverter streams them back-to-back in one reply (fast, up to ${STREAM_MAX}). A batch is samples taken back-to-back, so a large Burst suits fast signals (angle, currents); slow ones plot as flat steps. Over CAN, or with more values, each sample is its own read (up to 100), so a large Burst makes the chart update in bigger, slower steps.</p>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
           <button onclick=${addPlot}><${Icon} n="plus" />Add plot</button>
