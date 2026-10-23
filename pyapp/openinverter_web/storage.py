@@ -23,13 +23,18 @@ def default_data_dir():
 
 
 def frontend_dir():
-    """Locate the web frontend: wheel-embedded copy first, then repo checkout."""
-    pkg = Path(__file__).resolve().parent / "data"
-    if (pkg / "index.html").exists():
-        return pkg
+    """Locate the web frontend.
+
+    A checkout serves the repo's data/ directory, which is the copy the ESP32
+    image is built from. An installed wheel has no such neighbour and uses the
+    data/ embedded next to this package.
+    """
     repo = Path(__file__).resolve().parents[2] / "data"
-    if (repo / "index.html").exists():
+    if (repo / "index.html").is_file() and (repo.parent / "esp32-web-interface.ino").is_file():
         return repo
+    pkg = Path(__file__).resolve().parent / "data"
+    if (pkg / "index.html").is_file():
+        return pkg
     raise SystemExit(
         "Web frontend not found: neither the packaged data/ nor a repo checkout "
         "data/ directory exists. Reinstall the package or run from the repo."

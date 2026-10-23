@@ -1,0 +1,96 @@
+name: Live demo
+
+# The real web interface on a simulated inverter (demo/), on GitHub Pages: no
+# ESP32, no server. A push to main is a release here (build.yml cuts one), so
+# each release brings the demo up to date. Pull requests that touch the UI or
+# the demo build it and smoke-test it without publishing.
+#
+# The site also carries the browser installer (flash/): ESP Web Tools plus the
+# newest stable and dev full-flash images. Every successful release build (a
+# push to main or dev) redeploys it so the installer offers the latest of
+# each; a release made by the workflow token can't trigger this directly.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "data/**"
+      - "demo/**"
+      - "tests/e2e/demo-site.spec.mjs"
+      - ".github/workflows/demo.yml"
+  workflow_run:
+    workflows: ["Build combined images"]
+    types: [completed]
+    branches: [main, dev]
+  pull_request:
+    paths:
+      - "data/**"
+      - "demo/**"
+      - "tests/e2e/demo-site.spec.mjs"
+      - ".github/workflows/demo.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-${{ github.event_name == 'pull_request' && github.ref || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build + smoke test
+    # After a release build: only when it was a push that succeeded
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      # Loads the built site under a /<repo>/ sub-path, as Pages serves it
+      - name: Smoke test the demo
+        run: npx playwright test tests/e2e/demo-site.spec.mjs
+
+      - name: Build the site
+        run: node demo/build.mjs _site
+
+      # Same-origin copies of the release images for the installer page
+      - name: Bundle release images for the installer
+        if: github.event_name != 'pull_request'
+        run: node demo/flash-firmware.mjs _site
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        if: github.event_name != 'pull_request'
+        with:
+          path: _site
+
+  deploy:
+    # Only main publishes: the github-pages environment allows the default
+    # branch, and the demo should show what is released
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

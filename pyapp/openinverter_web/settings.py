@@ -44,6 +44,16 @@ class Settings:
         nodes = data.get("can_nodes", [])
         self.can_nodes = nodes if isinstance(nodes, list) else []
 
+    def reset_device(self):
+        """Factory-reset the connection settings. Layout files stay."""
+        self.dev_name = ""
+        self.can_node_id = 1
+        self.can_interface = ""
+        self.can_channel = ""
+        self.can_bitrate = 500000
+        self.can_nodes = []
+        self.save()
+
     def save(self):
         data = {
             "dev_name": self.dev_name,
@@ -82,6 +92,9 @@ class Settings:
             "can_pwr_inv": False,
             "can_en_pin": -1,
             "can_en_inv": False,
+            "sd_available": False,
+            "sd_enabled": False,
+            "sd_card": False,
             "arch": "pc",
             "sse_port": http_port,
             "can_nodes": self.can_nodes,

@@ -152,4 +152,16 @@ test.describe('Parameters tab', () => {
     // Favourites were persisted to the device
     await expect.poll(async () => (await mock.state()).files).toContain('favorites.json');
   });
+  // Regression: Enter ended the edit session but kept focus, so the next value was dropped
+  test('a second edit typed without leaving the field is sent too', async ({ page, mock }) => {
+    await openApp(page, mock);
+    await gotoTab(page, 'Parameters');
+    const input = page.locator('#params tr', { hasText: 'fweak' }).locator('input[type="number"]');
+    await input.fill('72');
+    await input.press('Enter');
+    await expect.poll(async () => (await mock.state()).inverter.params.fweak.value).toBe(72);
+    await input.fill('73'); // still focused
+    await input.press('Enter');
+    await expect.poll(async () => (await mock.state()).inverter.params.fweak.value).toBe(73);
+  });
 });

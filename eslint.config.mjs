@@ -8,7 +8,7 @@ import js from '@eslint/js';
 const browserGlobals = {
   window: 'readonly', document: 'readonly', navigator: 'readonly',
   location: 'readonly', history: 'readonly', localStorage: 'readonly',
-  fetch: 'readonly', FormData: 'readonly', Blob: 'readonly', File: 'readonly',
+  fetch: 'readonly', Headers: 'readonly', FormData: 'readonly', Blob: 'readonly', File: 'readonly',
   URL: 'readonly', URLSearchParams: 'readonly', AbortController: 'readonly',
   XMLHttpRequest: 'readonly', WebSocket: 'readonly', EventSource: 'readonly',
   setTimeout: 'readonly', clearTimeout: 'readonly',
@@ -17,7 +17,7 @@ const browserGlobals = {
   alert: 'readonly', confirm: 'readonly', prompt: 'readonly',
   console: 'readonly', performance: 'readonly',
   FileReader: 'readonly', TextDecoder: 'readonly', TextEncoder: 'readonly',
-  ResizeObserver: 'readonly', getComputedStyle: 'readonly',
+  ResizeObserver: 'readonly', getComputedStyle: 'readonly', Event: 'readonly',
 };
 
 export default [
@@ -26,7 +26,7 @@ export default [
     ignores: [
       'data/preact.umd.js', 'data/preact-hooks.umd.js', 'data/htm.umd.js',
       'data/nosleep.js', 'data/docstrings.js',
-      'node_modules/**', '.pio/**', 'playwright-report/**', 'test-results/**',
+      'node_modules/**', '.pio/**', '_site/**', 'playwright-report/**', 'test-results/**',
     ],
   },
   {
@@ -65,7 +65,35 @@ export default [
     rules: { ...js.configs.recommended.rules },
   },
   {
-    files: ['tests/**/*.mjs', 'tests/**/*.js', 'playwright.config.mjs', 'eslint.config.mjs'],
+    // Remote support bridge: a classic script whose `inverter` global is
+    // called by openinverter.org's support script on remote.html
+    files: ['data/inverter.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: { fetch: 'readonly' },
+    },
+    rules: {
+      ...js.configs.recommended.rules,
+      'no-unused-vars': ['error', { varsIgnorePattern: '^inverter$' }],
+    },
+  },
+  {
+    // Live demo transport + data: plain browser scripts loaded before app.js
+    files: ['demo/*.js', 'demo/flash/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: { ...browserGlobals, globalThis: 'readonly', Response: 'readonly' },
+    },
+    rules: {
+      ...js.configs.recommended.rules,
+      'no-empty': ['error', { allowEmptyCatch: true }],
+      'no-unused-vars': ['error', { args: 'none', caughtErrors: 'none' }],
+    },
+  },
+  {
+    files: ['tests/**/*.mjs', 'tests/**/*.js', 'demo/*.mjs', 'playwright.config.mjs', 'eslint.config.mjs'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',
@@ -74,7 +102,9 @@ export default [
         setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly', clearInterval: 'readonly',
         // page.evaluate/addInitScript callbacks execute in the browser
         document: 'readonly', window: 'readonly', localStorage: 'readonly', getComputedStyle: 'readonly',
-        navigator: 'readonly', Promise: 'readonly',
+        navigator: 'readonly', Promise: 'readonly', requestAnimationFrame: 'readonly',
+        // Node 18+ web globals used by the mock contract tests
+        FormData: 'readonly', Blob: 'readonly',
       },
     },
     rules: {

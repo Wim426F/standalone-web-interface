@@ -13,9 +13,28 @@ async function addGauge(page, name) {
   await modal.locator('button', { hasText: 'Done' }).click();
 }
 
+// gauges.json v4 also holds the Dashboard's page (named by `dashboard`);
+// these tests are about the gauge pages, so that one is set aside
 async function savedLayout(mock) {
-  return fetch(mock.url + '/gauges.json').then(r => r.json());
+  const data = await fetch(mock.url + '/gauges.json').then(r => r.json());
+  if (data && Array.isArray(data.pages) && data.dashboard != null) {
+    return { ...data, dashPage: data.pages.find(p => String(p.id) === String(data.dashboard)),
+      pages: data.pages.filter(p => String(p.id) !== String(data.dashboard)) };
+  }
+  return data;
 }
+
+// Deterministic "the UI has seen every value set so far": bump udc to a
+// fresh marker AFTER the other changes and wait for a visible udc tile to
+// show it. Each sample carries all streamed names, so the frame delivering
+// the marker also delivered the earlier changes (replaces fixed sleeps).
+let marker = 400;
+async function settle(page, mock) {
+  const v = ++marker;
+  await fetch(mock.url + `/__test/spot?name=udc&value=${v}`);
+  await expect(page.locator('.gauge-tile:visible', { hasText: String(v) }).first()).toBeVisible();
+}
+const udcTile = [{ id: 1, name: 'udc', type: 'text', x: 0, y: 0, w: 2, h: 1 }];
 
 test.describe('Gauges grid', () => {
   test('adds a gauge, streams its value, persists a v3 layout with geometry', async ({ page, mock }) => {
@@ -26,7 +45,8 @@ test.describe('Gauges grid', () => {
     await page.locator('button', { hasText: 'Save & Done' }).click();
     await expect.poll(async () => (await mock.state()).files).toContain('gauges.json');
     const layout = await savedLayout(mock);
-    expect(layout.v).toBe(3);
+    expect(layout.v).toBe(4);
+    expect(layout.dashPage && layout.dashPage.items.length).toBeGreaterThan(0); // the Dashboard's widgets
     expect(layout.pages).toHaveLength(1);
     expect(layout.pages[0].name).toBe('Main');
     const item = layout.pages[0].items[0];
@@ -88,7 +108,10 @@ test.describe('Gauges grid', () => {
     await page.mouse.down();
     await page.mouse.move(cx + 10, cy + 2, { steps: 2 });
     await page.mouse.move(cx + 300, cy, { steps: 15 });
-    await page.waitForTimeout(150);
+    // Release only once gridstack has actually picked the drag up and moved
+    // its drop placeholder (a fixed pause raced this under parallel load)
+    await expect(page.locator('.grid-stack-item.ui-draggable-dragging')).toHaveCount(1);
+    await expect.poll(async () => parseInt(await page.locator('.grid-stack-placeholder').getAttribute('gs-x') || '0')).toBeGreaterThan(0);
     await page.mouse.up();
     await expect.poll(async () => parseInt(await tile.getAttribute('gs-x') || '0')).toBeGreaterThan(0);
     // The click fired on mouseup after the drag must NOT open the settings
@@ -114,7 +137,7 @@ test.describe('Gauges grid', () => {
     await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
     await page.mouse.down();
     await page.mouse.move(hb.x + 280, hb.y + 60, { steps: 10 });
-    await page.waitForTimeout(150);
+    await expect(page.locator('.grid-stack-item.ui-resizable-resizing')).toHaveCount(1); // resize engaged
     await page.mouse.up();
     // Snaps back to a square, larger than before
     await expect.poll(async () => await tile.getAttribute('gs-w')).not.toBe('3');
@@ -131,7 +154,7 @@ test.describe('Gauges grid', () => {
     await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
     await page.mouse.down();
     await page.mouse.move(tb.x + 15, tb.y + 15, { steps: 10 });
-    await page.waitForTimeout(150);
+    await expect(page.locator('.grid-stack-item.ui-resizable-resizing')).toHaveCount(1); // resize engaged
     await page.mouse.up();
     await expect.poll(async () => await tile.getAttribute('gs-w')).toBe('2');
     expect(await tile.getAttribute('gs-h')).toBe('2');
@@ -185,7 +208,7 @@ test.describe('Gauges grid', () => {
     await modal.locator('select').first().selectOption('line');
     // Line-specific history controls appear; points input is labelled
     await modal.locator('input[min="5"]').fill('60'); // points (min=5 is unique to it)
-    await modal.locator('select').last().selectOption('1000'); // Sample is the last select (Type, Decimals, Sample)
+    await modal.locator('select:not(#tile-move)').last().selectOption('1000'); // Sample: last of Type, Decimals, Sample (Move to page comes after)
     await modal.locator('button', { hasText: 'Done' }).click();
     await page.locator('button', { hasText: 'Save & Done' }).click();
     await expect.poll(async () => {
@@ -351,7 +374,7 @@ test.describe('Gauges grid', () => {
     await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
     await page.mouse.down();
     await page.mouse.move(tb.x + 10, tb.y + 10, { steps: 10 });
-    await page.waitForTimeout(150);
+    await expect(page.locator('.grid-stack-item.ui-resizable-resizing')).toHaveCount(1); // resize engaged
     await page.mouse.up();
     // Shrunk to a single cell (attribute checks are racy for default w=1)
     const gridBox = await page.locator('.grid-stack').boundingBox();
@@ -404,7 +427,7 @@ test.describe('Gauges grid', () => {
     await expect(page.locator('.page-pill.active')).toHaveText('Main');
     await enterEdit(page);
     await page.locator('button', { hasText: 'Save & Done' }).click();
-    await expect.poll(async () => (await savedLayout(mock)).v).toBe(3);
+    await expect.poll(async () => (await savedLayout(mock)).v).toBe(4);
     const item = (await savedLayout(mock)).pages[0].items[0];
     expect(item.w).toBe(4); // legacy 'lg' size maps to a 4-cell span
     expect(item.max).toBe(500);
@@ -420,7 +443,7 @@ test.describe('Gauges grid', () => {
     await expect(page.locator('.gauge-tile-name', { hasText: 'speed' })).toBeVisible();
     await enterEdit(page);
     await page.locator('button', { hasText: 'Save & Done' }).click();
-    await expect.poll(async () => (await savedLayout(mock)).v).toBe(3);
+    await expect.poll(async () => (await savedLayout(mock)).v).toBe(4);
     const item = (await savedLayout(mock)).pages[0].items[0];
     // 6/12 of the grid stays half the grid: 6 -> 5 of 10 columns, still square
     expect(item.w).toBe(5);
@@ -547,62 +570,63 @@ test.describe('Gauges grid', () => {
 
   test('conditional page display switches to the page whose condition matches', async ({ page, mock }) => {
     // Conditions are inclusive ranges: Boost matches opmode EXACTLY 3 (not
-    // 0-2 or 4), Fast matches speed 500-and-up (open-ended max)
+    // 0-2 or 4), Fast matches speed 500-and-up (open-ended max). Every page
+    // carries a udc tile so settle() works whichever page is showing.
     const layout = { v: 3, pages: [
-      { id: 1, name: 'Main', items: [{ id: 1, name: 'udc', type: 'text', x: 0, y: 0, w: 2, h: 1 }] },
-      { id: 2, name: 'Boost', cond: { name: 'opmode', min: 3, max: 3 }, items: [] },
-      { id: 3, name: 'Fast', cond: { name: 'speed', min: 500 }, items: [] },
+      { id: 1, name: 'Main', items: udcTile },
+      { id: 2, name: 'Boost', cond: { name: 'opmode', min: 3, max: 3 }, items: udcTile },
+      { id: 3, name: 'Fast', cond: { name: 'speed', min: 500 }, items: udcTile },
     ] };
     await fetch(mock.url + '/__test/put-file?name=gauges.json', { method: 'POST', body: JSON.stringify(layout) });
     await openApp(page, mock);
     await gotoTab(page, 'Gauges');
     // opmode 0 / speed 0: nothing matches, first page shows
-    await page.waitForTimeout(500);
+    await settle(page, mock);
     await expect(page.locator('.page-pill.active')).toHaveText('Main');
     // opmode 2 is below the 3..3 range -> still no match
     await fetch(mock.url + '/__test/spot?name=opmode&value=2');
-    await page.waitForTimeout(500);
+    await settle(page, mock);
     await expect(page.locator('.page-pill.active')).toHaveText('Main');
     // opmode exactly 3 -> Boost
     await fetch(mock.url + '/__test/spot?name=opmode&value=3');
-    await expect(page.locator('.page-pill.active')).toHaveText('Boost', { timeout: 5000 });
+    await expect(page.locator('.page-pill.active')).toHaveText('Boost');
     // opmode 4 leaves the range: no page matches -> stays put
     await fetch(mock.url + '/__test/spot?name=opmode&value=4');
-    await page.waitForTimeout(500);
+    await settle(page, mock);
     await expect(page.locator('.page-pill.active')).toHaveText('Boost');
     // Open-ended range: speed 900 >= 500 -> Fast
     await fetch(mock.url + '/__test/spot?name=speed&value=900');
-    await expect(page.locator('.page-pill.active')).toHaveText('Fast', { timeout: 5000 });
+    await expect(page.locator('.page-pill.active')).toHaveText('Fast');
     // The user can browse away while the condition still matches
     await page.locator('.page-pill', { hasText: 'Main' }).click();
-    await page.waitForTimeout(500);
+    await settle(page, mock);
     await expect(page.locator('.page-pill.active')).toHaveText('Main');
     // A fresh match still fires
     await fetch(mock.url + '/__test/spot?name=speed&value=0');
-    await page.waitForTimeout(300);
+    await settle(page, mock);
     await fetch(mock.url + '/__test/spot?name=speed&value=900');
-    await expect(page.locator('.page-pill.active')).toHaveText('Fast', { timeout: 5000 });
+    await expect(page.locator('.page-pill.active')).toHaveText('Fast');
   });
 
   test('inverted condition matches outside the range (any-error page)', async ({ page, mock }) => {
     const layout = { v: 3, pages: [
-      { id: 1, name: 'Main', items: [{ id: 1, name: 'udc', type: 'text', x: 0, y: 0, w: 2, h: 1 }] },
+      { id: 1, name: 'Main', items: udcTile },
       { id: 2, name: 'Fault', cond: { name: 'lasterr', min: 0, max: 0, invert: true }, items: [] },
     ] };
     await fetch(mock.url + '/__test/put-file?name=gauges.json', { method: 'POST', body: JSON.stringify(layout) });
     await openApp(page, mock);
     await gotoTab(page, 'Gauges');
     // lasterr 0 is inside 0..0, inverted -> no match
-    await page.waitForTimeout(500);
+    await settle(page, mock);
     await expect(page.locator('.page-pill.active')).toHaveText('Main');
     await fetch(mock.url + '/__test/spot?name=lasterr&value=1');
-    await expect(page.locator('.page-pill.active')).toHaveText('Fault', { timeout: 5000 });
+    await expect(page.locator('.page-pill.active')).toHaveText('Fault');
   });
 
   test('Auto-switch toggle disarms conditional display and persists', async ({ page, mock }) => {
     const layout = { v: 3, pages: [
-      { id: 1, name: 'Main', items: [{ id: 1, name: 'udc', type: 'text', x: 0, y: 0, w: 2, h: 1 }] },
-      { id: 2, name: 'Fast', cond: { name: 'speed', min: 500 }, items: [] },
+      { id: 1, name: 'Main', items: udcTile },
+      { id: 2, name: 'Fast', cond: { name: 'speed', min: 500 }, items: udcTile },
     ] };
     await fetch(mock.url + '/__test/put-file?name=gauges.json', { method: 'POST', body: JSON.stringify(layout) });
     await openApp(page, mock);
@@ -611,12 +635,12 @@ test.describe('Gauges grid', () => {
     await page.locator('#auto-pages .slider').click(); // off
     await expect.poll(async () => (await savedLayout(mock)).autoPage).toBe(false);
     await fetch(mock.url + '/__test/spot?name=speed&value=900');
-    await page.waitForTimeout(700);
+    await settle(page, mock);
     await expect(page.locator('.page-pill.active')).toHaveText('Main');
     // The saved off state survives a reload
     await page.reload();
     await expect(page.locator('#version')).toContainText('Web: v0.1-mock');
-    await page.waitForTimeout(700);
+    await settle(page, mock);
     await expect(page.locator('.page-pill.active')).toHaveText('Main');
   });
 

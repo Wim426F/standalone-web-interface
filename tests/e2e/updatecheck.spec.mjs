@@ -7,6 +7,18 @@ const fulfillLatest = (page, body) =>
   page.route('https://api.github.com/repos/**/releases/latest', route =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) }));
 
+// Deterministic "the check has finished": checkLatestRelease() always ends
+// by caching its result, then the caller dispatches; yield a couple of
+// frames so any badge render would have landed before asserting its absence.
+async function checkSettled(page) {
+  await expect.poll(() => page.evaluate(() => {
+    try { return typeof JSON.parse(localStorage.getItem('updateCheck') || 'null').checkedAt; } catch (e) { return null; }
+  })).toBe('number');
+  await settleFrames(page);
+}
+const settleFrames = (page) => page.evaluate(() => new Promise(r =>
+  requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 0)))));
+
 test.describe('Update availability badge', () => {
   test('a newer release shows the navbar badge; clicking opens the Update tab pre-loaded', async ({ page, mock }) => {
     await fulfillLatest(page, { tag_name: 'v99.1' });
@@ -75,7 +87,7 @@ test.describe('Update availability badge', () => {
   test('a non-version tag from the API is discarded (XSS guard)', async ({ page, mock }) => {
     await fulfillLatest(page, { tag_name: '<img src=x onerror=alert(1)> v99.9' });
     await openApp(page, mock);
-    await page.waitForTimeout(600);
+    await checkSettled(page);
     await expect(page.locator('#update-badge')).toHaveCount(0);
     // ...and nothing version-shaped was cached from it either
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem('updateCheck') || '{}').tag)).toBeNull();
@@ -84,14 +96,14 @@ test.describe('Update availability badge', () => {
   test('an equal-or-older release shows no badge', async ({ page, mock }) => {
     await fulfillLatest(page, { tag_name: 'v0.0' }); // mock runs v0.1-mock
     await openApp(page, mock);
-    await page.waitForTimeout(600);
+    await checkSettled(page);
     await expect(page.locator('#update-badge')).toHaveCount(0);
   });
 
   test('offline check fails silently (no badge, no page errors)', async ({ page, mock }) => {
     // fixtures abort api.github.com by default — this is the offline path
     await openApp(page, mock);
-    await page.waitForTimeout(600);
+    await checkSettled(page);
     await expect(page.locator('#update-badge')).toHaveCount(0);
   });
 
@@ -102,7 +114,7 @@ test.describe('Update availability badge', () => {
     await expect(page.locator('#update-badge')).toHaveCount(0);
     await page.reload();
     await expect(page.locator('#version')).toContainText('Web: v0.1-mock');
-    await page.waitForTimeout(600);
+    await checkSettled(page); // served from the cached check, no request
     await expect(page.locator('#update-badge')).toHaveCount(0);
   });
 
@@ -121,7 +133,7 @@ test.describe('Update availability badge', () => {
     await page.evaluate(() => localStorage.removeItem('updateCheck'));
     await page.reload();
     await expect(page.locator('#version')).toContainText('Web: v0.1-mock');
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(800); // absence check: no request may fire
     expect(calls).toBe(1);
   });
 });

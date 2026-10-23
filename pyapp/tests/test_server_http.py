@@ -151,6 +151,45 @@ def test_can_detect_by_interface(web):
     assert status == 200 and json.loads(body)["channels"] == []
 
 
+def post(port, path, body, ctype="application/x-www-form-urlencoded"):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.request("POST", path, body.encode() if isinstance(body, str) else body,
+                 {"Content-Type": ctype})
+    r = conn.getresponse()
+    data = r.read()
+    conn.close()
+    return r.status, data
+
+
+def test_reset_settings_from_body(web):
+    status, _ = get(web, "/settings?dev_name=Landy&can_interface=virtual"
+                         "&can_channel=sim&can_bitrate=250000&can_node_id=7")
+    assert status == 200
+    status, body = post(web, "/settings", "reset_settings=1")
+    assert status == 200 and json.loads(body)["rebooting"] is False
+    _, body = get(web, "/settings")
+    data = json.loads(body)
+    assert data["dev_name"] == ""
+    assert data["can_interface"] == ""
+    assert data["can_channel"] == ""
+    assert data["can_bitrate"] == 500000
+    assert data["can_node_id"] == 1
+    assert data["sd_available"] is False
+
+
+def test_auth_is_absent(web):
+    # No /auth/* : the frontend treats that as sign-in off (everyone is admin)
+    status, _ = get(web, "/auth/state")
+    assert status == 404
+
+
+def test_redesign_assets(web):
+    for path in ("/style.css", "/gridstack-all.js", "/gridstack.min.css",
+                 "/inverter.js", "/fonts/intertight.woff2", "/fonts/jbmono.woff2"):
+        status, body = get(web, path)
+        assert status == 200 and len(body) > 50, path
+
+
 def test_stub_endpoints(web):
     _, body = get(web, "/version")
     assert body.startswith(b"v") and b"-pc" in body

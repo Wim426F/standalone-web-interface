@@ -1,6 +1,6 @@
 """The HTTP server: reproduces the ESP32 firmware's web contract.
 
-Endpoint spec: esp32-web-interface.cpp route registrations and
+Endpoint spec: esp32-web-interface.ino route registrations and
 tests/mock-esp/server.mjs. Differences from the ESP32:
   - /stream (SSE) is served on the SAME port; /settings advertises it via
     sse_port (the frontend builds its EventSource URL from that value).
@@ -200,6 +200,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._ajson(stored if stored is not None else LAYOUT_DEFAULTS[name])
 
         if path == "/settings":
+            q = self._merged_form(q)
             if q:
                 return self._apply_settings(q)
             return self._tjson(app.settings.public(
@@ -285,12 +286,36 @@ class Handler(BaseHTTPRequestHandler):
         # GET: the legacy SPIFFS editor page, when the frontend ships one
         return self._serve_static("/edit.htm")
 
+    def _merged_form(self, q):
+        """Query string plus an application/x-www-form-urlencoded body.
+
+        The firmware's hasArg() sees both. The reset control posts its flag
+        in the body; the interface Save still uses the query string.
+        """
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/x-www-form-urlencoded":
+            return q
+        raw = self._body()
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("latin-1", errors="replace")
+        for key, vals in parse_qs(text, keep_blank_values=True).items():
+            q.setdefault(key, vals[0] if vals else "")
+        return q
+
     def _apply_settings(self, q):
         app = self.app
         s = app.settings
         # Keyed by which args are present, like the firmware's handleSettings
-        if "txrx_swap" in q or "ap_fallback" in q:
+        if "txrx_swap" in q or "ap_fallback" in q or "sd_enabled" in q:
             return self._tjson('{"result":"ok"}')  # ESP-only toggles: accepted, ignored
+        if "reset_settings" in q:
+            s.reset_device()
+            if not app.flasher.busy():
+                app.bus.reconfigure()
+                app.device.invalidate()
+            return self._tjson('{"result":"ok","rebooting":false}')
         if "dev_name" in q:
             s.dev_name = q["dev_name"][:32]
             s.save()

@@ -13,3 +13,4 @@ __pycache__/
 pyapp/.venv/
 pyapp/dist/
 pyapp/.pytest_cache/
+_site/

@@ -102,13 +102,13 @@ The test suite runs the whole stack — HTTP server, SDO client, flasher —
 against a simulated inverter on a python-can `virtual` bus, with no
 hardware needed.
 
-Protocol references: `src/can_protocol.cpp` and `esp32-web-interface.cpp`
+Protocol references: `src/can_protocol.cpp` and `esp32-web-interface.ino`
 in the repo root, and `PROTOCOL.md`.
 
 ## Relationship to other projects
 
 This package reproduces the CAN protocol implemented in this repo's ESP32
-firmware (`src/can_protocol.cpp`, `esp32-web-interface.cpp`) and serves the
+firmware (`src/can_protocol.cpp`, `esp32-web-interface.ino`) and serves the
 same `data/` frontend, so any device that works with the ESP32 module in CAN
 mode works here too.
 
