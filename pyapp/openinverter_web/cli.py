@@ -60,7 +60,8 @@ def main(argv=None):
         description="OpenInverter web interface served from your PC over CAN "
                     "(python-can: socketcan, slcan, gs_usb, pcan, kvaser, vector, ...)")
     ap.add_argument("--host", default="127.0.0.1",
-                    help="bind address (default 127.0.0.1; use 0.0.0.0 to expose on the LAN)")
+                    help="bind address (default 127.0.0.1; use 0.0.0.0 to expose on the LAN "
+                         "- there is no sign-in, so anyone on that network can control the inverter)")
     ap.add_argument("--port", type=int, default=None,
                     help="HTTP port (default 8998, falling back to a free port "
                          "if Windows reserves it; 0 picks a free port)")

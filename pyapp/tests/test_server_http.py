@@ -88,7 +88,7 @@ def test_layout_default_and_upload_roundtrip(web):
 
 def test_sse_stream(web):
     s = socket.create_connection(("127.0.0.1", web), timeout=10)
-    s.sendall(b"GET /stream?names=udc,tmphs&ms=50 HTTP/1.1\r\nHost: t\r\n\r\n")
+    s.sendall(b"GET /stream?names=udc,tmphs&ms=50 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
     buf = b""
     while b"data: " not in buf:
         chunk = s.recv(4096)
@@ -200,3 +200,46 @@ def test_stub_endpoints(web):
     assert json.loads(body)["sta_connected"] is False
     _, body = get(web, "/virtual-reload")
     assert json.loads(body) == {"count": 0}
+
+
+def get_h(port, path, headers):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.request("GET", path, headers=headers)
+    r = conn.getresponse()
+    r.read()
+    conn.close()
+    return r.status, r.getheader("Access-Control-Allow-Origin")
+
+
+def test_same_origin_page_may_send_commands(web):
+    host = "127.0.0.1:%d" % web
+    status, acao = get_h(web, "/cmd?cmd=json", {
+        "Sec-Fetch-Site": "same-origin", "Origin": "http://" + host})
+    assert status == 200 and acao is None
+
+
+def test_other_websites_cannot_send_commands(web):
+    # an <img>/fetch from another site: no Origin on a plain GET, but
+    # browsers always mark it cross-site
+    status, _ = get_h(web, "/cmd?cmd=set%20fweak%2042", {"Sec-Fetch-Site": "cross-site"})
+    assert status == 403
+    status, _ = get_h(web, "/cmd?cmd=json", {"Origin": "https://evil.example"})
+    assert status == 403
+    status, _ = get_h(web, "/cmd?cmd=json", {"Origin": "null"})
+    assert status == 403
+    # another app on localhost (different port) is same-site, not same-origin
+    status, _ = get_h(web, "/settings", {"Sec-Fetch-Site": "same-site"})
+    assert status == 403
+
+
+def test_dns_rebinding_host_is_refused(web):
+    status, _ = get_h(web, "/cmd?cmd=json", {"Host": "evil.example:%d" % web})
+    assert status == 403
+    status, _ = get_h(web, "/cmd?cmd=json", {"Host": "localhost:%d" % web})
+    assert status == 200
+
+
+def test_link_from_elsewhere_still_opens_the_app(web):
+    nav = {"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate"}
+    assert get_h(web, "/", nav)[0] == 200
+    assert get_h(web, "/cmd?cmd=json", nav)[0] == 403

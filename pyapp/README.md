@@ -54,6 +54,10 @@ openinverter-web --simulate
 Other flags: `--host 0.0.0.0` (expose on the LAN), `--port`, `--node`,
 `--data-dir`, `--no-browser`.
 
+There is no sign-in: with `--host 0.0.0.0` anyone on your network can
+control the inverter. Only the page the app serves itself may send commands;
+requests from other websites open in your browser are refused.
+
 ## Supported adapters
 
 Anything python-can supports. The common ones:

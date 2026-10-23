@@ -34,7 +34,14 @@ LAYOUT_DEFAULTS = {
 
 SSE_NAMES_RE = re.compile(r"^[A-Za-z0-9_.,\-]+$")
 
-WIFI_STATUS_STUB = ('{"sta_connected":false,"rssi":0,"ssid":"","ip":"",'
+LOOPBACK_NAMES = ("127.0.0.1", "localhost", "::1")
+
+
+def _is_loopback(host):
+    return host in LOOPBACK_NAMES or host.startswith("127.")
+
+
+WIFI_STATUS_STUB =('{"sta_connected":false,"rssi":0,"ssid":"","ip":"",'
                     '"ap_active":false,"ap_clients":0,"ap_fallback":false}')
 
 
@@ -93,6 +100,7 @@ class App:
         self.flasher = flasher
         self.webroot = frontend_dir()
         self.http_port = 0
+        self.loopback_only = True  # bound to localhost: Host must name it too
         self.running = True
         self.sse_gen = 0
         self._sse_lock = threading.Lock()
@@ -128,7 +136,6 @@ class Handler(BaseHTTPRequestHandler):
             if encoding:
                 self.send_header("Content-Encoding", encoding)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Access-Control-Allow-Origin", "*")
             # Revalidate on every load — a cached page pointing at a stopped
             # server silently renders the ESP32 fallback UI
             self.send_header("Cache-Control", "no-cache")
@@ -172,11 +179,38 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         self._route("PUT")
 
+    # ---- request origin ----
+
+    def _request_allowed(self, method, path):
+        """Only the page this server served may drive the inverter.
+
+        Writes are plain GETs (/cmd?cmd=set ...), so any website open in the
+        same browser could otherwise fire them at localhost. Browsers mark
+        every request with Sec-Fetch-Site and cross-origin ones with Origin;
+        clients that send neither (curl, scripts) are not browsers and pass.
+        The Host check stops DNS rebinding while we only listen on loopback.
+        """
+        host = (self.headers.get("Host") or "").strip().lower()
+        if self.app.loopback_only and not _is_loopback(urlparse("//" + host).hostname or ""):
+            return False
+        site = self.headers.get("Sec-Fetch-Site")
+        cross = site is not None and site not in ("same-origin", "none")
+        origin = self.headers.get("Origin")
+        if origin is not None and urlparse(origin.strip().lower()).netloc != host:
+            cross = True  # also catches "Origin: null" (sandboxed frames)
+        if not cross:
+            return True
+        # Following a link to the app from elsewhere still opens it
+        return (method == "GET" and path in ("/", "/index.html")
+                and self.headers.get("Sec-Fetch-Mode") == "navigate")
+
     # ---- routing ----
 
     def _route(self, method):
         url = urlparse(self.path)
         path = url.path
+        if not self._request_allowed(method, path):
+            return self._text("Forbidden: cross-origin request", 403)
         q = {k: v[0] for k, v in parse_qs(url.query, keep_blank_values=True).items()}
         app = self.app
 
@@ -464,7 +498,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "keep-alive")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(b"retry: 1000\n\n")
             self.wfile.flush()
@@ -515,4 +548,5 @@ def make_server(app, host, port):
     httpd = WebServer((host, port), Handler)
     httpd.app = app
     app.http_port = httpd.server_address[1]
+    app.loopback_only = _is_loopback(host)
     return httpd
