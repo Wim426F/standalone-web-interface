@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openinverter-web"
+dynamic = ["version"]
+description = "OpenInverter web interface served from your PC over CAN (python-can) - the ESP32 web interface without the ESP32"
+readme = "README.md"
+requires-python = ">=3.9"
+keywords = ["openinverter", "can", "canopen", "ev", "inverter", "stm32-sine", "zombieverter"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Interface Engine/Protocol Translator",
+]
+dependencies = [
+    # [serial] pulls pyserial, needed for slcan adapters
+    "python-can[serial]>=4.0",
+]
+
+[project.optional-dependencies]
+# candleLight/CANable in gs_usb mode (Windows needs a WinUSB driver via Zadig)
+gs_usb = ["python-can[gs_usb]"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+openinverter-web = "openinverter_web.cli:main"
+
+[project.urls]
+Repository = "https://github.com/wjcloudy/esp32-web-interface"
+
+[tool.hatch.version]
+path = "openinverter_web/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["openinverter_web"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.sdist.hooks.custom]
+path = "hatch_build.py"

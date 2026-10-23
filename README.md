@@ -83,6 +83,11 @@ It is one board, no app to install and no cloud: the ESP32 joins your Wi-Fi (or
 makes its own access point) and serves the interface from its own flash. On a
 phone it installs to the home screen like an app.
 
+The same interface also runs on a computer, with no ESP32. [`pyapp/`](pyapp/)
+serves these pages and talks to the inverter or VCU over a USB CAN adapter
+([python-can](https://python-can.readthedocs.io/): socketcan, slcan,
+gs_usb/candleLight, PCAN, Kvaser, Vector). See [`pyapp/README.md`](pyapp/README.md).
+
 ## Quick start
 
 1. **Get an image** from the [latest release](https://github.com/wjcloudy/esp32-web-interface/releases/latest).
