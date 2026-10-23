@@ -248,6 +248,9 @@
       case '/version': return reply(D.webVersion);
       case '/otainfo': return reply({ version: D.webVersion, repo: D.repo, target: settings.arch });
       case '/list': return reply([...new Set([...files.keys(), ...SITE_IMAGES])].map(name => ({ type: 'file', name })), 200, 'text/json');
+      // What the firmware image ships (fs_stage.py writes it on a device):
+      // here, the bundled pictures, sizes unknown
+      case '/fs-manifest.json': return reply({ v: 2, files: Object.fromEntries(SITE_IMAGES.map(n => [n, null])) }, 200, 'application/json');
       case '/edit':
         if (method === 'POST' && isImageUpload(init && init.body)) {
           notice('no image was uploaded');

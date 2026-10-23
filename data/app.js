@@ -206,12 +206,16 @@ const api = {
     return r.text();
   },
 
+  // { ok, status } so a refused delete (a UI file needs an admin) can say so
   async deleteFile(filename) {
-    await fetch('/edit?f=' + encodeURIComponent(filename), { method: 'DELETE' });
+    try {
+      const r = await fetch('/edit?f=' + encodeURIComponent(filename), { method: 'DELETE' });
+      return { ok: r.ok, status: r.status };
+    } catch (e) { return { ok: false, status: 0 }; }
   },
 
   async getFileList() {
-    const r = await fetch('/list');
+    const r = await fetch('/list', { cache: 'no-store' });
     return r.json();
   },
 
@@ -2937,8 +2941,65 @@ const CanMapping = () => {
 
 // ==================== Files ====================
 
+// Files you saved or uploaded, when there's no fs-manifest.json to go by
+// (an older image): layouts, settings, the subscription, uploaded pictures
+const USER_DATA_FILES = new Set([...UPDATE_STASH_FILES, 'uiprefs.json', 'settings.json', 'subscription.js']);
+const fmtSize = (n) => n == null || isNaN(n) ? '' : n < 1024 ? n + ' B' : (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
+
 const Files = () => {
   const { state, dispatch } = useContext(Store);
+  // The image's fs-manifest.json (fs_stage.py) lists what it shipped and
+  // each file's size: those are system files (marked Original, or Modified
+  // when the size on the device differs, or Missing), anything else is yours
+  const [shipped, setShipped] = useState(null); // Map name -> size (null: unknown)
+  const [pending, setPending] = useState(null); // file awaiting delete confirmation
+  const [msg, setMsg] = useState('');
+  useEffect(() => {
+    fetch('/fs-manifest.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : null)
+      .then(d => setShipped(!d || !d.files ? null
+        : new Map(Array.isArray(d.files) ? d.files.map(n => [n, null]) : Object.entries(d.files)))).catch(() => {});
+  }, []);
+  const refresh = async () => dispatch({ type: 'SET_FILE_LIST', payload: await api.getFileList() });
+  const isShipped = (name) => shipped ? shipped.has(name) : !(USER_DATA_FILES.has(name) || isUserImage(name));
+  const files = state.fileList.map(f => ({ ...f, name: String(f.name).replace(/^\/+/, '') }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const mine = files.filter(f => !isShipped(f.name));
+  const onDevice = new Set(files.map(f => f.name));
+  const system = [...files.filter(f => isShipped(f.name)),
+    ...(shipped ? [...shipped.keys()].filter(n => !onDevice.has(n)).map(name => ({ name, missing: true })) : [])]
+    .sort((a, b) => a.name.localeCompare(b.name));
+  // Original / Modified / Missing, when the manifest says what was shipped
+  const state_ = (f) => {
+    if (f.missing) return 'missing';
+    const size = shipped && shipped.get(f.name);
+    if (size == null || f.size == null) return null;
+    return Number(f.size) === Number(size) ? 'original' : 'modified';
+  };
+  const BADGE = { original: 'Original', modified: 'Modified', missing: 'Missing' };
+  const doDelete = async (f) => {
+    setPending(null);
+    const r = await api.deleteFile(f.name);
+    setMsg(r.ok ? '' : r.status === 403 ? 'Deleting ' + f.name + ' needs an admin account.'
+      : r.status === 404 ? f.name + ' was already gone.' : 'Could not delete ' + f.name + (r.status ? ' (HTTP ' + r.status + ')' : ' (no connection)') + '.');
+    await refresh().catch(() => {});
+  };
+  const row = (f) => {
+    const st = isShipped(f.name) ? state_(f) : null;
+    return html`
+    <tr key=${f.name} class=${f.missing ? 'file-missing' : ''}>
+      <td>${f.name}${st && html` <span class=${'file-badge ' + st} title=${st === 'modified' ? 'Its size differs from the file this build shipped' : st === 'missing' ? 'Shipped with this build, no longer on the device' : 'As shipped with this build'}>${BADGE[st]}</span>`}</td>
+      <td class="file-size">${fmtSize(f.size)}</td>
+      <td class="file-actions">${!f.missing && html`
+        <a class="butt" href=${'/' + f.name.split('/').map(encodeURIComponent).join('/')} download=${f.name.split('/').pop()} title=${'Download ' + f.name}><${Icon} n="download" />Download</a>
+        <button disabled=${!can('operator')} onclick=${() => setPending(f)}><${Icon} n="trash" />Delete</button>`}
+      </td>
+    </tr>`;
+  };
+  const group = (id, title, list) => list.length > 0 && html`
+    <tbody class="files-group" id=${id}>
+      <tr class="files-group-head"><th colspan="3">${title} <span class="files-count">${list.length}</span></th></tr>
+      ${list.map(row)}
+    </tbody>`;
   return html`
     <div id="files" class="tabdiv main-content" style="display:flex">
       <div class="main-right">
@@ -2956,18 +3017,24 @@ const Files = () => {
       </div>
       <div class="main-left">
         <h2>Files</h2>
-        <table>
+        ${msg && html`<p class="perm-note" id="files-msg" role="status">${msg}</p>`}
+        ${/* Download is a plain link: the browser saves what the ESP serves for
+            the name (a .gz twin downloads as the gzip itself) */ ''}
+        <table class="files-table">
           <thead><tr><th>Name</th><th>Size</th><th>Actions</th></tr></thead>
-          <tbody>
-            ${state.fileList.map(f => html`
-              <tr key=${f.name}>
-                <td>${f.name}</td>
-                <td>${f.size}</td>
-                <td><button disabled=${!can('operator')} onclick=${async () => { await api.deleteFile(f.name); dispatch({ type: 'SET_FILE_LIST', payload: await api.getFileList() }); }}>Delete</button></td>
-              </tr>
-            `)}
-          </tbody>
+          ${group('files-mine', 'Your files', mine)}
+          ${group('files-system', 'System files', system)}
         </table>
+        ${pending && html`
+          <${Modal} id="file-delete" title="Delete file" onClose=${() => setPending(null)}>
+            <p>Delete <b>${pending.name}</b>? This can't be undone.</p>
+            ${isShipped(pending.name) && html`<p style="font-size:.85rem;color:var(--amber)">It's a system file, part of the web interface: the page may stop working properly until the next update puts it back.</p>`}
+            <div style="display:flex;gap:8px;margin-top:1rem">
+              <button onclick=${() => setPending(null)}>Cancel</button>
+              <button id="file-delete-confirm" onclick=${() => doDelete(pending)}
+                style="background:var(--red);color:#fff;border-color:transparent"><${Icon} n="trash" />Delete</button>
+            </div>
+          </${Modal}>`}
       </div>
     </div>
   `;
@@ -5034,22 +5101,70 @@ const TerminalTile = () => {
     </div>`;
 };
 
+// Start the inverter: `start 2` (manual run) on the sine firmware. The FOC
+// build has no start command ("Not implemented in FOC variant") and no
+// manual run mode; its manualstart test parameter starts it in Run instead.
+// manualstart LATCHES: the firmware only acts on it once every interlock
+// passes (no throttle, brake seen, emcystop/mprot, udcsw <= udc < udclim)
+// and clears it only on starting. Left set while one blocks, the inverter
+// would start by itself later, so it's cleared again unless the start
+// happens within a few seconds, and on Stop
+let usedManualStart = false;
+const parseNum = (t) => { const m = /-?\d+(\.\d+)?/.exec(t || ''); return m ? parseFloat(m[0]) : NaN; };
+async function startInverter(statusEnums) {
+  const r = await api.getText('start 2');
+  if (!/not implemented in foc/i.test(r)) return r;
+  usedManualStart = true;
+  const s = await api.getText('set manualstart 1');
+  if (!/ok/i.test(s || '')) return 'FOC firmware: could not set manualstart: ' + (s || '').trim();
+  for (let i = 0; i < 10; i++) {
+    await new Promise(res => setTimeout(res, 300));
+    const op = parseNum(await api.getText('get opmode').catch(() => ''));
+    if (op > 0) return 'FOC firmware has no manual run mode: started in Run with manualstart.';
+  }
+  // Didn't start: disarm it, and say what held it back
+  await api.getText('set manualstart 0').catch(() => {});
+  const st = parseNum(await api.getText('get status').catch(() => ''));
+  const why = isNaN(st) ? '' : ' Status: ' + enumText(st, statusEnums) + '.';
+  return 'FOC firmware: the inverter did not start (an interlock is holding it), so manualstart was cleared again; it won\'t start by itself later.' + why;
+}
+async function stopInverter() {
+  const r = await api.getText('stop');
+  // A start still pending from manualstart must not fire after a Stop
+  if (usedManualStart) await api.getText('set manualstart 0').catch(() => {});
+  return r;
+}
+
 // Start/stop and reboot buttons
 const ActionsTile = ({ g }) => {
-  const { dispatch } = useContext(Store);
-  const [confirmAction, setConfirmAction] = useState(null); // 'inverter' | 'esp32'
+  const { state, dispatch } = useContext(Store);
+  const [confirmAction, setConfirmAction] = useState(null); // 'start' | 'inverter' | 'esp32'
   const want = Array.isArray(g.btns) && g.btns.length ? g.btns : DASH_ACTIONS.map(a => a.id);
+  const start = () => {
+    const statusEnums = state.spotValues && state.spotValues.status && state.spotValues.status.enums;
+    startInverter(statusEnums).then(r => dispatch({ type: 'SET_MESSAGES', payload: r })).catch(() => {});
+  };
+  // Starting drives the motor, so it asks first, like the reboots; Stop never waits
   const run = (id) => {
-    if (id === 'start') api.getText('start 2').then(r => dispatch({ type: 'SET_MESSAGES', payload: r }));
-    else if (id === 'stop') api.getText('stop').then(r => dispatch({ type: 'SET_MESSAGES', payload: r }));
-    else setConfirmAction(id === 'resetinv' ? 'inverter' : 'esp32');
+    if (id === 'stop') stopInverter().then(r => dispatch({ type: 'SET_MESSAGES', payload: r })).catch(() => {});
+    else setConfirmAction(id === 'start' ? 'start' : id === 'resetinv' ? 'inverter' : 'esp32');
   };
   return html`
     <div class="widget-actions">
       ${DASH_ACTIONS.filter(a => want.includes(a.id)).map(a => html`
         <${Gate} need=${a.need} key=${a.id}><button class=${a.id === 'reboot' ? 'danger' : ''} title=${a.label} onclick=${() => run(a.id)}><${Icon} n=${a.icon} />${a.label}</button></${Gate}>`)}
     </div>
-    ${confirmAction && html`
+    ${confirmAction === 'start' && html`
+      <${Modal} id="start-inverter" title="Start inverter" onClose=${() => setConfirmAction(null)}>
+        <p>Are you sure you want to start the inverter in manual mode?</p>
+        <p style="font-size:.85rem;color:var(--text2)">The motor can turn once it runs: make sure the vehicle is safe to move or the wheels are off the ground. On FOC firmware, which has no manual mode, it starts in normal Run.</p>
+        <div style="display:flex;gap:8px;margin-top:1rem">
+          <button onclick=${() => setConfirmAction(null)}>Cancel</button>
+          <button id="start-confirm" onclick=${() => { setConfirmAction(null); start(); }}
+            style="background:var(--red);color:#fff;border-color:transparent"><${Icon} n="play" />Start</button>
+        </div>
+      </${Modal}>`}
+    ${confirmAction && confirmAction !== 'start' && html`
       <${Modal} id="reset-modal" title=${confirmAction === 'inverter' ? 'Reset inverter' : 'Reboot ESP32'} onClose=${() => setConfirmAction(null)}>
         <p>${confirmAction === 'inverter'
           ? 'This will send a reset command to the inverter (STM32). The inverter will reboot. The web interface will remain accessible.'
